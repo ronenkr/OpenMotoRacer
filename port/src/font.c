@@ -256,9 +256,11 @@ int font_init(char *err, int errsize)
     script_close(&s);
     /* (the game loads only the fonts its condition allows, and changes them with the
        screen mode, 0x4961d0; the port has them all) */
+#ifndef OMR_ESP32
     for (i = 0; i < n; i++)
         if (g_fonts[i])
             load_font(g_fonts[i]);
+#endif
     return 1;
 bad:
     script_close(&s);
@@ -279,9 +281,29 @@ int font_partnered(int n)
     return 0;
 }
 
+/* the ESP32: a font's files read the first time it is asked for (35 fonts, 0.85 MB, most never
+   used in a race; NOTES §4.26). Elsewhere all are read at the start. */
+#ifdef OMR_ESP32
+static unsigned char g_font_tried[MAX_FONTS];
+static int need(int n)
+{
+    if (n >= 0 && n < MAX_FONTS && g_fonts[n] && !g_fonts[n]->loaded && !g_font_tried[n]) {
+        g_font_tried[n] = 1;
+        load_font(g_fonts[n]);
+    }
+    return n;
+}
+#else
+static int need(int n)
+{
+    return n;
+}
+#endif
+
 /* a font by its own number, no partner (*0x4f1810 + 4n), or 0 */
 Font *font_raw(int n)
 {
+    need(n);
     return n >= 0 && n < MAX_FONTS && g_fonts[n] && g_fonts[n]->loaded ? g_fonts[n] : 0;
 }
 
@@ -294,10 +316,11 @@ Font *font_get(int n)
     for (i = 0; i < (int)(sizeof pairs / sizeof pairs[0]); i++)
         if (n == pairs[i][!hires])
             m = pairs[i][hires];
-    if (g_fonts[m] && g_fonts[m]->loaded)
+    if (g_fonts[need(m)] && g_fonts[m]->loaded)
         return g_fonts[m];
-    if (g_fonts[n] && g_fonts[n]->loaded)
+    if (g_fonts[need(n)] && g_fonts[n]->loaded)
         return g_fonts[n];
+    need(8);
     return g_fonts[8];
 }
 

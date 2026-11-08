@@ -4,6 +4,7 @@
 #include "exe.h"
 #include "bitmap.h"
 #include "files.h"
+#include <stdint.h>
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
@@ -36,7 +37,16 @@ static const struct {
 };
 static int g_build = -1;
 
-static unsigned char *g_image;
+/* The image as the loader lays it out, but only what the file holds: the headers and each
+   section's stored bytes (with a little of what follows them), the rest of a section reading
+   as zeros as it would (the 1997 MOTO.EXE's .data is 2 MB, 100 KB of it in the file), the code
+   left out; 0.3 MB in place of 3, which the ESP32's PSRAM needs (NOTES §4.26). */
+#define PIECES 16
+#define SLACK 0x10000u                  /* zeros kept after a section's stored bytes */
+#define ZEROS 0x10000u                  /* the longest read wholly past them */
+static struct { unsigned va, n, end, file, raw; unsigned char *at; } g_piece[PIECES];
+static int g_npieces;
+static unsigned char *g_image;          /* the pieces, one after another */
 static unsigned g_size;
 static unsigned g_rsrc;         /* the resources' place in the image (the PE's directory 2) */
 
@@ -71,18 +81,46 @@ static int place(const unsigned char *d, unsigned long len)
     opt = pe + 0x18;
     if (u32(d + opt + 0x1c) != BASE)
         return 0;
+    unsigned long total = 0;
+    unsigned char *to;
     g_size = u32(d + opt + 0x38);
     g_rsrc = u32(d + opt + 0x70);
-    g_image = calloc(1, g_size);
-    if (!g_image)
+    if (nsec + 1 > PIECES)
         return 0;
-    for (i = 0; i < nsec; i++) {
-        const unsigned char *s = d + opt + u16(d + pe + 0x14) + 40 * i;
-        unsigned va = u32(s + 12), raw = u32(s + 16), at = u32(s + 20), vsize = u32(s + 8);
-        unsigned n = raw < vsize || !vsize ? raw : vsize;
-        if ((unsigned long)at + n > len || va + n > g_size)
+    /* the headers first, as the loader maps them (SizeOfHeaders), then the sections */
+    g_npieces = 0;
+    for (i = 0; i <= nsec; i++) {
+        const unsigned char *s = d + opt + u16(d + pe + 0x14) + 40 * (i - 1);
+        unsigned va, raw, at, vsize, n, keep;
+        if (i == 0)
+            va = 0, at = 0, raw = vsize = u32(d + opt + 0x3c);
+        else
+            va = u32(s + 12), raw = u32(s + 16), at = u32(s + 20), vsize = u32(s + 8);
+        /* the code and the relocations are never read (only tables, strings and resources
+           are: the pictures and races the same without them), 0.9 MB the ESP32 needs */
+        if (i > 0 && (u32(s + 36) & 0x02000020u))   /* IMAGE_SCN_CNT_CODE, _MEM_DISCARDABLE */
+            raw = 0;
+        if (!vsize)
+            vsize = raw;
+        n = raw < vsize ? raw : vsize;
+        if ((unsigned long)at + n > len || va > g_size || vsize > g_size - va)
             return 0;
-        memcpy(g_image + va, d + at, n);
+        keep = vsize - n < SLACK ? vsize : n + SLACK;
+        g_piece[g_npieces].va = va;
+        g_piece[g_npieces].n = keep;
+        g_piece[g_npieces].end = vsize;
+        g_piece[g_npieces].file = at;
+        g_piece[g_npieces].raw = n;
+        g_npieces++;
+        total += keep;
+    }
+    free(g_image);
+    if (!(g_image = calloc(1, total + ZEROS)))
+        return 0;
+    for (to = g_image, i = 0; i < (unsigned)g_npieces; i++) {
+        memcpy(to, d + g_piece[i].file, g_piece[i].raw);
+        g_piece[i].at = to;
+        to += g_piece[i].n;
     }
     return 1;
 }
@@ -186,9 +224,20 @@ unsigned exe_addr(int what)
 
 const unsigned char *exe_at(unsigned va, unsigned len)
 {
+    int i;
     if (!g_image || va < BASE || va - BASE > g_size || len > g_size - (va - BASE))
         return 0;
-    return g_image + (va - BASE);
+    va -= BASE;
+    for (i = 0; i < g_npieces; i++)
+        if (va >= g_piece[i].va && va - g_piece[i].va < g_piece[i].end) {
+            unsigned off = va - g_piece[i].va;
+            if (len <= g_piece[i].n && off <= g_piece[i].n - len)
+                return g_piece[i].at + off;
+            if (off >= g_piece[i].n && len <= ZEROS)
+                return g_image + (g_piece[g_npieces - 1].at - g_image) + g_piece[g_npieces - 1].n;
+            return 0;
+        }
+    return len <= ZEROS ? g_piece[g_npieces - 1].at + g_piece[g_npieces - 1].n : 0;   /* between sections */
 }
 
 unsigned exe_u32(unsigned va)
@@ -200,7 +249,8 @@ unsigned exe_u32(unsigned va)
 const char *exe_str(unsigned va)
 {
     const unsigned char *p = exe_at(va, 1);
-    if (!p || !memchr(p, 0, g_size - (va - BASE)))
+    const unsigned char *end = g_image + (g_piece[g_npieces - 1].at - g_image) + g_piece[g_npieces - 1].n + ZEROS;
+    if (!p || !memchr(p, 0, (size_t)(end - p)))
         return "";
     return (const char *)p;
 }

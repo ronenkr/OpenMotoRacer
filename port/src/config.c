@@ -3,6 +3,7 @@
    rewrite after it do. */
 #include "video.h"
 #include "config.h"
+#include "esp32.h"
 #include "mister.h"
 #include "exe.h"
 #include "trackmap.h"
@@ -154,6 +155,15 @@ void config_load(void)
         g_binding[i][0] = g_cfg[CFG_ACTION0_KEY + 2 * i];
         g_binding[i][1] = g_cfg[CFG_ACTION0_BTN + 2 * i];
     }
+#ifdef OMR_ESP32
+    /* the board: tilt, buttons and touch come as the game's pad (esp32/main/omr_esp32.c) */
+    if (!own)
+        esp32_default_bindings();
+    g_input_device = 4;
+    g_joy_type = 4;
+    g_mode169 = 0;
+    g_race_screen = 0;          /* 320x240, shown at 284x216 */
+#endif
 #ifdef MISTER_HYBRID
     if (!own)
         mister_default_bindings();

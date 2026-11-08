@@ -96,8 +96,7 @@ static int load(Model *m, const char *f3df, const char *fmap, const char *base)
             if (mkind >= 3) {
                 f->ut[k] = (float)(int)u32(r + 0x22 + 4 * j);  /* 0x422ed0's floats */
                 f->vt[k] = (float)(int)u32(r + 0x32 + 4 * j);
-                f->u[k] = (int)u32(r + 0x22 + 4 * j) * 8192;
-                f->v[k] = (int)u32(r + 0x32 + 4 * j) * 8192;
+
             }
         }
         m->nf++;
@@ -143,7 +142,7 @@ int model_load_bike(Model *m, const char *f3df, const char *fmap, int flag)
         const unsigned char *r = mp + 0x200 + 0x80 * i;
         Face *f = &m->f[i];
         const uint8_t *idx = r3d_page_index(f->page);
-        const uint16_t *rgb = f->page >= 0 && f->page < R3D_PAGES ? g_texpage[f->page] : 0;
+        const uint16_t *rgb = f->page < R3D_PAGES ? g_texpage[f->page] : 0;
         if (u16(r) < 3) {
             f->colour = (int)u16(r + 2);
             continue;
@@ -152,9 +151,9 @@ int model_load_bike(Model *m, const char *f3df, const char *fmap, int flag)
             f->kind = f->kind == 0x10 ? 1 : 2;
         /* corners 0-2 on one texel: a face of that colour, a palette index on a paletted
            page, else the texel itself */
-        if ((idx || rgb) && f->u[0] == f->u[1] && f->u[1] == f->u[2] && f->v[0] == f->v[1]
-            && f->v[1] == f->v[2]) {
-            int t = ((f->v[0] >> 13) << 8) + (f->u[0] >> 13);
+        if ((idx || rgb) && FACE_U(f, 0) == FACE_U(f, 1) && FACE_U(f, 1) == FACE_U(f, 2)
+            && FACE_V(f, 0) == FACE_V(f, 1) && FACE_V(f, 1) == FACE_V(f, 2)) {
+            int t = ((FACE_V(f, 0) >> 13) << 8) + (FACE_U(f, 0) >> 13);
             f->kind = 0;
             f->colour = idx ? idx[t & 0xffff] : rgb[t & 0xffff];
         }
@@ -231,8 +230,11 @@ void model_mirror(Model *m)
         for (k = 0; k < f->n / 2; k++) {
             int j = f->n - 1 - k, t;
             t = f->idx[k], f->idx[k] = f->idx[j], f->idx[j] = t;
-            t = f->u[k], f->u[k] = f->u[j], f->u[j] = t;
-            t = f->v[k], f->v[k] = f->v[j], f->v[j] = t;
+            {   /* (the texels go round with the corners) */
+                float w = f->ut[k];
+                f->ut[k] = f->ut[j], f->ut[j] = w;
+                w = f->vt[k], f->vt[k] = f->vt[j], f->vt[j] = w;
+            }
         }
     }
 }

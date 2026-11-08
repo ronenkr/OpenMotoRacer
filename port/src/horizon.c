@@ -134,7 +134,11 @@ int horizon_load(const char *folder)
     char path[0x180];
     int i;
     horizon_free();
+#ifdef OMR_ESP32
+    for (i = 0; i < 1; i++) {           /* (the board's race is 320x240 only) */
+#else
     for (i = 0; i < 3; i++) {
+#endif
         snprintf(path, sizeof path, "%sBank\\%s.raw", folder, names[i]);
         if (!load_picture(&g_pics[i], path, g_rects[i][0])) {
             horizon_free();

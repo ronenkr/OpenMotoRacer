@@ -148,8 +148,8 @@ static void load_glass(void)
             f->n = 3;
             for (k = 0; k < 3; k++) {
                 f->idx[k] = order[i][k];
-                f->u[k] = u[order[i][k]] * 8192;
-                f->v[k] = v[order[i][k]] * 8192;
+                f->ut[k] = (float)u[order[i][k]];   /* (x 8192: the affine texels) */
+                f->vt[k] = (float)v[order[i][k]];
             }
         }
         g_nglass++;
@@ -187,7 +187,11 @@ static int load_resources(char *err, int errsize)
     load_glass();
     sound_menu_load();          /* 0x403f90 */
     for (id = 0; id < MENU_PICS; id++)
+#ifdef OMR_ESP32
+        if (!g_pics[id].pix && !g_pics[id].id && !bitmap_load_id_lazy(&g_pics[id], id)) {
+#else
         if (!g_pics[id].pix && !bitmap_load_id(&g_pics[id], id)) {
+#endif
             snprintf(err, errsize, "The menu picture %d could not be read.", id);
             return 0;
         }

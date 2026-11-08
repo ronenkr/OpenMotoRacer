@@ -21,4 +21,13 @@ static inline int ftol(double x)
     return 0;
 }
 
+/* the same of a float (exact as a double): the FPU's own truncation when it is in range (the
+   ESP32's doubles are done in software) */
+static inline int ftolf(float x)
+{
+    if (x > -2147483648.0f && x < 2147483648.0f)
+        return (int)x;
+    return ftol((double)x);
+}
+
 #endif

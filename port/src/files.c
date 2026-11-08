@@ -24,9 +24,10 @@ static char g_data[1024];
 
 typedef struct {
     char name[16];                 /* "MENU" */
-    unsigned char *d;              /* the whole file; 0 if it could not be read */
-    unsigned long len;
+    unsigned char *d;              /* its table (u32 count, 0x2c-byte records); 0 if unread */
+    unsigned long len;             /* the file's length */
     unsigned count;
+    char path[1024];               /* where it is: a file is read from it when asked for */
 } Bank;
 
 static Bank g_banks[MAX_BANKS];
@@ -182,12 +183,19 @@ static unsigned u32(const unsigned char *p)
     return (unsigned)p[0] | (unsigned)p[1] << 8 | (unsigned)p[2] << 16 | (unsigned)p[3] << 24;
 }
 
-/* the bank DATA\<name>.BKF, read whole the first time it is asked for */
+/* the bank DATA\<name>.BKF: its table read the first time it is asked for, a file out of it
+   read from the disk each time (the banks were read whole once: 5-6 MB a track, more than the
+   ESP32 has, NOTES §4.26) */
+static FILE *g_bank_file;          /* the last bank read from, kept open */
+static const Bank *g_bank_open;
+
 static Bank *bank(const char *name)
 {
     char rel[64];
-    long len = 0;
+    unsigned char h[4];
     Bank *b;
+    FILE *f;
+    long n;
     int i;
     for (i = 0; i < g_nbanks; i++)
         if (strcasecmp(g_banks[i].name, name) == 0)
@@ -197,16 +205,84 @@ static Bank *bank(const char *name)
     b = &g_banks[g_nbanks++];
     snprintf(b->name, sizeof b->name, "%s", name);
     snprintf(rel, sizeof rel, "data/%s.BKF", name);
-    b->d = files_read(rel, &len);
-    b->len = (unsigned long)len;
-    if (b->d && (b->len < 4 || 4 + 0x2cul * u32(b->d) > b->len)) {
-        free(b->d);
-        b->d = 0;
+    if (!files_find(rel, b->path, sizeof b->path) || !(f = fopen(b->path, "rb")))
+        return 0;
+    if (fseek(f, 0, SEEK_END) == 0 && (n = ftell(f)) >= 4 && fseek(f, 0, SEEK_SET) == 0
+        && fread(h, 1, 4, f) == 4 && 4 + 0x2cul * u32(h) <= (unsigned long)n
+        && (b->d = malloc(4 + 0x2cul * u32(h)))) {
+        memcpy(b->d, h, 4);
+        if (fread(b->d + 4, 0x2c, u32(h), f) != u32(h)) {
+            free(b->d);
+            b->d = 0;
+        }
+        b->len = (unsigned long)n;
     }
+    fclose(f);
     if (!b->d)
         return 0;
     b->count = u32(b->d);
     return b;
+}
+
+static unsigned char *bank_piece(const Bank *b, unsigned off, unsigned size)
+{
+    unsigned char *d = malloc(size ? size : 1);
+    if (!d)
+        return 0;
+    if (g_bank_open != b) {
+        if (g_bank_file)
+            fclose(g_bank_file);
+        g_bank_file = fopen(b->path, "rb");
+        g_bank_open = g_bank_file ? b : 0;
+    }
+    if (!g_bank_file || fseek(g_bank_file, (long)off, SEEK_SET) != 0
+        || fread(d, 1, size, g_bank_file) != size) {
+        free(d);
+        return 0;
+    }
+    return d;
+}
+
+FILE *dsi_fopen(const char *path, long *len)
+{
+    char up[256], *rest, found[1024];
+    size_t n = strlen(path), i;
+    FILE *f;
+    if (n < sizeof up) {
+        for (i = 0; i <= n; i++)
+            up[i] = (char)toupper((unsigned char)path[i]);
+        for (i = 0; i < n; i++)
+            if (up[i] == '/')
+                up[i] = '\\';
+        if (strncmp(up, "DATA\\", 5) == 0 && (rest = strchr(up + 5, '\\'))) {
+            Bank *b;
+            *rest++ = 0;
+            if ((b = bank(up + 5)))
+                for (i = 0; i < b->count; i++) {
+                    const unsigned char *r = b->d + 4 + 0x2c * i;
+                    char name[0x25];
+                    unsigned off = u32(r + 0x24), size = u32(r + 0x28);
+                    memcpy(name, r, 0x24);
+                    name[0x24] = 0;
+                    if (strcasecmp(name, rest) == 0 && off <= b->len && size <= b->len - off) {
+                        if (!(f = fopen(b->path, "rb")) || fseek(f, (long)off, SEEK_SET) != 0) {
+                            if (f)
+                                fclose(f);
+                            return 0;
+                        }
+                        *len = (long)size;
+                        return f;
+                    }
+                }
+        }
+    }
+    if (!files_find(path, found, sizeof found) || !(f = fopen(found, "rb")))
+        return 0;
+    if (fseek(f, 0, SEEK_END) != 0 || (*len = ftell(f)) < 0 || fseek(f, 0, SEEK_SET) != 0) {
+        fclose(f);
+        return 0;
+    }
+    return f;
 }
 
 unsigned char *dsi_load(const char *path, long *len)
@@ -232,10 +308,9 @@ unsigned char *dsi_load(const char *path, long *len)
                     memcpy(name, r, 0x24);
                     name[0x24] = 0;
                     if (strcasecmp(name, rest) == 0 && off <= b->len && size <= b->len - off) {
-                        unsigned char *d = malloc(size ? size : 1);
+                        unsigned char *d = bank_piece(b, off, size);
                         if (!d)
                             return 0;
-                        memcpy(d, b->d + off, size);
                         if (len)
                             *len = size;
                         return d;

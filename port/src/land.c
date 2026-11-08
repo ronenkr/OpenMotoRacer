@@ -20,19 +20,34 @@
 
 Land g_land;
 
+/* the track file read through a window of it (it is 1.3 MB: the ESP32 has no room for it
+   whole, NOTES §4.26) */
+#define WINDOW 32768
 typedef struct {
-    const unsigned char *d;
-    long len, p;
+    FILE *f;
+    long start, len, p;
     int bad;
+    long wbase, wlen;
+    unsigned char *buf;
 } Reader;
 
 static const unsigned char *take(Reader *r, long n)
 {
-    const unsigned char *q = r->d + r->p;
-    if (r->bad || n < 0 || n > r->len - r->p) {
+    const unsigned char *q;
+    if (r->bad || n < 0 || n > r->len - r->p || n > WINDOW) {
         r->bad = 1;
         return 0;
     }
+    if (r->p < r->wbase || r->p + n > r->wbase + r->wlen) {
+        long want = r->len - r->p < WINDOW ? r->len - r->p : WINDOW;
+        if (fseek(r->f, r->start + r->p, SEEK_SET) != 0
+            || (r->wlen = (long)fread(r->buf, 1, (size_t)want, r->f)) < n) {
+            r->bad = 1;
+            return 0;
+        }
+        r->wbase = r->p;
+    }
+    q = r->buf + (r->p - r->wbase);
     r->p += n;
     return q;
 }
@@ -101,9 +116,8 @@ static void read_model(Reader *r, Model *m)
         for (k = 0; k < 5; k++) {
             float u = rd_f32(r), v = rd_f32(r);
             if (k < 4) {
-                f->ut[k] = u, f->vt[k] = v;
+                f->ut[k] = u, f->vt[k] = v;     /* (the affine u: ftol(u x 8192.0), FACE_U) */
                 /* (the files have rubbish in faces' unused corners) */
-                f->u[k] = ftol(u * 8192.0), f->v[k] = ftol(v * 8192.0);
             }
         }
         for (k = 0; k < f->n; k++) {
@@ -194,18 +208,21 @@ static void read_anims(Reader *r)
 }
 
 /* 0x40d650 */
-static int read_trk(const unsigned char *d, long len)
+static int read_trk(FILE *f, long len)
 {
-    Reader r = { d, len, 0, 0 };
+    Reader r = { f, ftell(f), len, 0, 0, 0, 0, 0 };
     Land *l = &g_land;
+    const unsigned char *magic;
     int i, k, v, n;
-    if (len < 12 || memcmp(d, "TRK", 4))
+    if (len < 12 || r.start < 0 || !(r.buf = malloc(WINDOW)) || !(magic = take(&r, 4))
+        || memcmp(magic, "TRK", 4)) {
+        free(r.buf);
         return 0;
-    r.p = 4;
+    }
     v = l->version = rd_i32(&r);
     l->nsec = rd_count(&r, 0xb4);
     if (!(l->sec = calloc((size_t)l->nsec + 1, sizeof *l->sec)))
-        return 0;
+        { free(r.buf); return 0; }
     for (i = 0; i < l->nsec; i++) {
         Section *s = &l->sec[i];
         for (k = 0; k < 3; k++)
@@ -235,13 +252,13 @@ static int read_trk(const unsigned char *d, long len)
     }
     l->nblock = rd_count(&r, 8);
     if (!(l->block = calloc((size_t)l->nblock + 1, sizeof *l->block)))
-        return 0;
+        { free(r.buf); return 0; }
     for (i = 0; i < l->nblock; i++)
         read_model(&r, &l->block[i]);
     if (v > 0) {
         l->nlib = rd_count(&r, 28);
         if (!(l->lib = calloc((size_t)l->nlib + 1, sizeof *l->lib)))
-            return 0;
+            { free(r.buf); return 0; }
         for (i = 0; i < l->nlib; i++) {
             read_name(&r, l->lib[i].name, sizeof l->lib[i].name);
             for (k = 0; k < 3; k++)
@@ -250,7 +267,7 @@ static int read_trk(const unsigned char *d, long len)
         }
         l->ndecor = rd_count(&r, 32);
         if (!(l->decor = calloc((size_t)l->ndecor + 1, sizeof *l->decor)))
-            return 0;
+            { free(r.buf); return 0; }
         for (i = 0; i < l->ndecor; i++) {
             Decor *o = &l->decor[i];
             char name[64];
@@ -291,6 +308,7 @@ static int read_trk(const unsigned char *d, long len)
     for (i = 0; i < l->nsec; i++)
         if (l->sec[i].block < 0 || l->sec[i].block >= l->nblock)
             l->sec[i].block = 0;
+    free(r.buf);
     return !r.bad && l->nsec > 0 && l->nblock > 0;
 }
 
@@ -336,7 +354,7 @@ int land_load(int track, char *err, int errsize)
 {
     Script s;
     char spt[0x120], land[64], name[64], path[0x180];
-    unsigned char *d;
+    FILE *f;
     long len;
     int i, k, ok;
     land_free();
@@ -363,6 +381,9 @@ int land_load(int track, char *err, int errsize)
             snprintf(path, sizeof path, "%s%s", g_tracks[track].folder, name);
             if (!r3d_load_page(i, path))
                 fprintf(stderr, "openmotoracer: %s could not be read\n", path);
+#ifdef OMR_ESP32
+            r3d_page_to8(i);                    /* (half the memory: the board's 8 MB) */
+#endif
         }
     }
     /* the int fields (0x425bb0 / 0x425080) and the float ones (0x4257e0 / 0x424c00) in
@@ -401,12 +422,12 @@ int land_load(int track, char *err, int errsize)
         return 0;
     }
     snprintf(path, sizeof path, "%s%s", g_tracks[track].folder, land);
-    if (!(d = dsi_load(path, &len))) {
+    if (!(f = dsi_fopen(path, &len))) {
         snprintf(err, (size_t)errsize, "%s could not be read.", path);
         return 0;
     }
-    ok = read_trk(d, len);
-    free(d);
+    ok = read_trk(f, len);
+    fclose(f);
     /* 0x40df3c: the checkpoint sections, in the track's order, take TimeCheckPoint's times
        one after the other */
     for (i = k = 0; ok && i < g_land.nsec; i++)

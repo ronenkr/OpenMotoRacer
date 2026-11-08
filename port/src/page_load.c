@@ -21,7 +21,7 @@ static int g_step;
 /* 0x4470d0, a step of the race's load */
 void loading_progress(void)
 {
-    if (!g_load.pix)
+    if (!bitmap_loaded(&g_load))
         return;
     bitmap_draw(&g_load, BM_OWN, 100, 0);
     bitmap_draw(&g_pics[P_LOADING], BM_OWN, 100, 0);
@@ -51,7 +51,7 @@ void page_load_frame(void)
             bitmap_place(&g_pics[P_REVERSE], 4, 470, 0);
         /* (the badges are tested here too, but the menu is still up and they are not
            drawn until the load's steps) */
-        if (g_load.pix)
+        if (bitmap_loaded(&g_load))
             bitmap_draw(&g_load, BM_OWN, 100, 0);
         bitmap_draw(&g_pics[P_LOADING], BM_OWN, 100, 0);
         g_step = 1;

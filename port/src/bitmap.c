@@ -26,7 +26,14 @@ static unsigned u32(const unsigned char *p)
    the literal bytes, u32, then u32 flag words from 0x14. A flag word is read from its top
    bit down, a 1 put after its last bit marking its end: 1 = one literal byte, 0 = a u16
    copy word, back (low 10 bits) and length (high 6 bits + 3). */
+static unsigned char *lez_unpack_n(const unsigned char *d, long len, unsigned *outlen, unsigned limit);
 static unsigned char *lez_unpack(const unsigned char *d, long len, unsigned *outlen)
+{
+    return lez_unpack_n(d, len, outlen, 0);
+}
+
+/* the first `limit` bytes only, if limit (the TGA's header, for its size) */
+static unsigned char *lez_unpack_n(const unsigned char *d, long len, unsigned *outlen, unsigned limit)
 {
     unsigned size, words, lits, fp = 0x18, bits, bit, n = 0;
     unsigned char *out;
@@ -38,7 +45,11 @@ static unsigned char *lez_unpack(const unsigned char *d, long len, unsigned *out
     bits = u32(d + 0x14);
     bit = bits >> 31;
     bits = bits * 2 + 1;
-    if (size == 0 || size > 0x1000000 || !(out = malloc(size)))
+    if (size == 0 || size > 0x1000000)
+        return 0;
+    if (limit && limit < size)
+        size = limit;
+    if (!(out = malloc(size)))
         return 0;
     for (;;) {
         if (bit) {
@@ -124,6 +135,10 @@ static int lez_to_bitmap(Bitmap *b, const unsigned char *t, unsigned len)
     return 1;
 }
 
+#ifdef OMR_ESP32
+static int to8(Bitmap *b, unsigned char *t, unsigned tlen);
+#endif
+
 int bitmap_load_lez(Bitmap *b, const char *path, int mode)
 {
     long len = 0;
@@ -138,6 +153,16 @@ int bitmap_load_lez(Bitmap *b, const char *path, int mode)
     free(d);
     if (!t)
         return 0;
+#ifdef OMR_ESP32
+    if (mode != BM_TILE && tlen >= 0x12) {      /* the board: kept 8-bit, half the memory */
+        b->w = (int16_t)(t[12] | t[13] << 8);
+        b->h = (int16_t)(t[14] | t[15] << 8);
+        if (b->w > 0 && b->h > 0 && to8(b, t, tlen))
+            return 1;
+        free(t);
+        return 0;
+    }
+#endif
     ok = lez_to_bitmap(b, t, tlen);
     free(t);
     return ok;
@@ -173,8 +198,176 @@ int bitmap_load_id(Bitmap *b, int id)
     return 0;
 }
 
+/* ------------------------------------------------------------------ the ESP32's cache */
+#ifdef OMR_ESP32
+#define CACHE_BUDGET (1536u * 1024)     /* bytes of pixels kept */
+#define CACHE_MAX 64
+static Bitmap *g_cached[CACHE_MAX];
+static int g_ncached;
+static unsigned g_cache_bytes, g_clock;
+
+static unsigned pix_bytes(const Bitmap *b)
+{
+    return b->mode == BM_TILE ? 128u * 128 + 512 : (unsigned)b->w * (unsigned)b->h + 512;
+}
+
+static void uncache(int i)
+{
+    Bitmap *b = g_cached[i];
+    g_cache_bytes -= pix_bytes(b);
+    free(b->block);
+    b->block = 0;
+    b->px8 = 0;
+    b->pal = 0;
+    g_cached[i] = g_cached[--g_ncached];
+}
+
+void bitmap_cache_flush(void)
+{
+    while (g_ncached)
+        uncache(0);
+}
+
+/* the picture numbered id's unpacked TGA (as bitmap_load_id finds it), its first `limit` bytes
+   if limit */
+static unsigned char *find_tga(int id, unsigned limit, unsigned *tlen, int *mode)
+{
+    unsigned a;
+    for (a = exe_addr(X_BITMAP_TABLE); exe_at(a, 20) && exe_u32(a + 8) != 0xffffffffu; a += 20) {
+        const char *name = exe_str(exe_u32(a + 12));
+        unsigned lang = exe_u32(a + 4);
+        char path[256];
+        int k;
+        if (exe_u32(a + 8) != (unsigned)id)
+            continue;
+        *mode = (int)exe_u32(a + 16);
+        for (k = lang ? 0 : 1; k < 2; k++) {
+            long len = 0;
+            unsigned char *d, *t;
+            if (lang)
+                snprintf(path, sizeof path, "%s%s", exe_str(exe_u32(exe_addr(X_LANG_FOLDERS) + 4 * (k ? 0 : g_lang))), name);
+            else
+                snprintf(path, sizeof path, "data\\menu\\bitmap\\%s", name);
+            if (!(d = dsi_load(path, &len)))
+                continue;
+            t = lez_unpack_n(d, len, tlen, limit);
+            free(d);
+            if (t)
+                return t;
+        }
+        fprintf(stderr, "bitmap %d: %s not found\n", id, name);
+        return 0;
+    }
+    return 0;
+}
+
+/* the pixels of a lazily loaded picture as palette indices, making room first: the TGA kept,
+   its header and palette made the 16-bit palette in place */
+/* a TGA (its header, palette and indices) made a picture's 8-bit pixels and 16-bit palette, in
+   place: the TGA is kept (freed with the picture), or freed */
+static int to8(Bitmap *b, unsigned char *t, unsigned tlen)
+{
+    uint16_t pal[256];
+    int i, npal, at;
+    npal = (int16_t)(t[5] | t[6] << 8);
+    at = 0x12 + 3 * npal;
+    if (npal < 0 || npal > 256 || (unsigned)at + (unsigned)(b->w * b->h) > tlen) {
+        free(t);
+        return 0;
+    }
+    if (npal == 0)
+        for (i = 0; i < 256; i++)
+            pal[i] = (uint16_t)((i >> 3) << 11 | (i >> 2) << 5 | i >> 3);
+    for (i = 0; i < npal; i++) {
+        const unsigned char *c = t + 0x12 + 3 * i;
+        pal[i] = (uint16_t)((c[2] >> 3) << 11 | (c[1] >> 2) << 5 | c[0] >> 3);
+    }
+    for (i = npal ? npal : 256; i < 256; i++)
+        pal[i] = 0;
+    if (at < 512) {                     /* no room for the palette before the pixels */
+        unsigned char *n = malloc(512 + (size_t)b->w * b->h);
+        if (!n) {
+            free(t);
+            return 0;
+        }
+        memcpy(n + 512, t + at, (size_t)b->w * b->h);
+        free(t);
+        t = n;
+        at = 512;
+    }
+    memcpy(t, pal, 512);
+    b->block = t;
+    b->pal = (uint16_t *)t;
+    b->px8 = t + at;
+    return 1;
+}
+
+static void need(Bitmap *b)
+{
+    unsigned tlen = 0;
+    unsigned char *t;
+    int i, old, mode;
+    if (b->pix || b->px8 || !b->id)
+        return;
+    while (g_ncached && (g_ncached == CACHE_MAX || g_cache_bytes + pix_bytes(b) > CACHE_BUDGET)) {
+        for (old = 0, i = 1; i < g_ncached; i++)
+            if (g_cached[i]->used < g_cached[old]->used)
+                old = i;
+        uncache(old);
+    }
+    if (!(t = find_tga(b->id - 1, 0, &tlen, &mode)))
+        return;
+    if (!to8(b, t, tlen))
+        return;
+    g_cached[g_ncached++] = b;
+    g_cache_bytes += pix_bytes(b);
+}
+
+/* its size and mode now (the TGA's header), its pixels when drawn */
+int bitmap_load_id_lazy(Bitmap *b, int id)
+{
+    unsigned tlen = 0;
+    int mode;
+    unsigned char *t = find_tga(id, 0x12, &tlen, &mode);
+    if (!t)
+        return 0;
+    memset(b, 0, sizeof *b);
+    b->mode = mode;
+    b->w = (int16_t)(t[12] | t[13] << 8);
+    b->h = (int16_t)(t[14] | t[15] << 8);
+    b->id = id + 1;
+    free(t);
+    if (b->mode == BM_TILE && (b->w < 128 || b->h < 128))
+        return 0;
+    if (b->mode == BM_TILE)
+        b->w = 128;                     /* (its rows of indices: the tile's own 128) */
+    return b->w > 0 && b->h > 0;
+}
+#else
+void bitmap_cache_flush(void)
+{
+}
+#endif
+
+int bitmap_loaded(const Bitmap *b)
+{
+#ifdef OMR_ESP32
+    if (b->px8)
+        return 1;
+#endif
+    return b->pix != 0;
+}
+
 void bitmap_free(Bitmap *b)
 {
+#ifdef OMR_ESP32
+    if (b->block && !b->id) {           /* (a cached one is the cache's to give up) */
+        free(b->block);
+        b->block = 0;
+        b->px8 = 0;
+        b->pal = 0;
+    }
+#endif
     free(b->pix);
     b->pix = 0;
 }
@@ -254,13 +447,76 @@ static void draw_tile(const Bitmap *b)
     }
 }
 
+#ifdef OMR_ESP32
+/* the same drawing from a cached picture's indices and palette */
+static void draw8(const Bitmap *b, int mode, long off, int rows, int cols, uint16_t *dst)
+{
+    const uint8_t *src = b->px8 + off;
+    const uint16_t *pal = b->pal;
+    int k;
+    switch (mode) {
+    case BM_OPAQUE:
+        for (; rows; rows--, src += b->w, dst += g_pitch)
+            for (k = 0; k < cols; k++)
+                dst[k] = pal[src[k]];
+        break;
+    case BM_KEYED:
+        for (; rows; rows--, src += b->w, dst += g_pitch)
+            for (k = 0; k < cols; k++)
+                if (pal[src[k]])
+                    dst[k] = pal[src[k]];
+        break;
+    case BM_HALF:
+    case BM_HALF_KEYED: {
+        int step = 1, n = cols >> 1, even = cols & ~1;
+        for (; rows; rows--) {
+            for (k = 0; k < n; k++, src += 2, dst += 2)
+                if (mode == BM_HALF || pal[*src])
+                    *dst = pal[*src];
+            src += b->w + step - even;
+            dst += g_pitch + step - even;
+            step = -step;
+        }
+        break;
+    }
+    }
+}
+
+static void draw_tile8(const Bitmap *b)
+{
+    int y, x, row = b->sy;
+    uint16_t *dst = g_screen;
+    for (y = 0; y < 480; y++) {
+        const uint8_t *src = b->px8 + (row & 0x7f) * 128;
+        int sx = b->sx & 0x7f;
+        for (x = 0; x < 640; x++)
+            dst[x] = b->pal[src[(sx + x) & 0x7f]];
+        row = (row & 0x7f) + 1;
+        dst += g_pitch;
+    }
+}
+#endif
+
 void bitmap_draw(const Bitmap *b, int mode, int pct_h, int pct_w)
 {
     if (!g_draw_2d)             /* 0x43edf3 */
         return;
     int x, y, rows, cols, skip, k;
+    long off;
     const uint16_t *src;
     uint16_t *dst;
+#ifdef OMR_ESP32
+    if (b) {
+        ((Bitmap *)b)->used = ++g_clock;
+        need((Bitmap *)b);
+    }
+    if (b && !b->pix && b->px8) {
+        if (b->mode == BM_TILE) {
+            draw_tile8(b);
+            return;
+        }
+    } else
+#endif
     if (!b || !b->pix)
         return;
     if (b->mode == BM_TILE) {
@@ -278,18 +534,18 @@ void bitmap_draw(const Bitmap *b, int mode, int pct_h, int pct_w)
     skip = (100 - pct_h) * b->h / 100;
     x = b->x;
     y = b->y + skip;
-    src = b->pix + skip * b->w;
+    off = (long)skip * b->w;
     rows = b->h - skip;
     cols = b->w + pct_w * b->w / -100;
     if (x >= g_scr_w || x + b->w < 0 || y >= g_scr_h || y + rows < 0)
         return;
     if (x < 0) {
         cols += x;
-        src -= x;
+        off -= x;
         x = 0;
     }
     if (y < 0) {
-        src -= y * b->w;
+        off -= (long)y * b->w;
         rows += y;
         y = 0;
     }
@@ -303,6 +559,13 @@ void bitmap_draw(const Bitmap *b, int mode, int pct_h, int pct_w)
     VIDEO_ROWS(y, y + rows - 1);
     if (mode == BM_OWN)
         mode = b->mode;
+#ifdef OMR_ESP32
+    if (!b->pix) {
+        draw8(b, mode, off, rows, cols, dst);
+        return;
+    }
+#endif
+    src = b->pix + off;
     switch (mode) {
     case BM_OPAQUE:
         for (; rows; rows--, src += b->w, dst += g_pitch)

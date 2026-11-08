@@ -55,8 +55,6 @@ static void square(Piece *p, int kind, const int uv[4][2], unsigned colour)
         f->n = 4;
         for (k = 0; k < 4; k++) {
             f->idx[k] = i ? 3 - k : k;
-            f->u[k] = uv[k][0] * 8192;
-            f->v[k] = uv[k][1] * 8192;
             f->ut[k] = (float)uv[k][0];
             f->vt[k] = (float)uv[k][1];
         }

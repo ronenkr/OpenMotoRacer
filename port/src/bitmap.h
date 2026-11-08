@@ -23,6 +23,11 @@ typedef struct {
     int dx, dy;         /* +0x4c, +0x50 */
     unsigned t0, dur, t1; /* +0x54, +0x58, +0x5c: start, length, end (ms) */
     int ease;           /* +0x60: 0 straight, 1 eased in and out */
+    int id;             /* the port's: its number + 1 when its pixels come and go (ESP32) */
+    unsigned used;      /* the port's: when it was last drawn */
+    uint8_t *px8;       /* the port's (ESP32): the pixels as palette indices, w a row */
+    uint16_t *pal;      /* and the palette, 256 colours */
+    void *block;        /* where both are */
 } Bitmap;
 
 extern int g_lang;      /* 0 US, 1 French, 2 German, 3 Italian, 4 Spanish, 5 Swedish (0x4dbce8) */
@@ -32,6 +37,12 @@ int bitmap_load_id(Bitmap *b, int id);
 /* a .LEZ file by the game's path */
 int bitmap_load_lez(Bitmap *b, const char *path, int mode);
 void bitmap_free(Bitmap *b);
+int bitmap_loaded(const Bitmap *b);    /* it has pixels (16-bit, or the ESP32's 8-bit) */
+/* the ESP32 (NOTES §4.26): the menu's 209 pictures are 20 MB as pixels, more than its 8 MB, so
+   only their sizes are read at the start and their pixels when drawn, the least lately drawn
+   given up past a budget; flush gives them all up (a race needs the room) */
+int bitmap_load_id_lazy(Bitmap *b, int id);
+void bitmap_cache_flush(void);
 
 /* 0x43fa40: put it at (x, y); align 1 centres it across the 640 pixels (y as given),
    2 centres it on (x, y) */

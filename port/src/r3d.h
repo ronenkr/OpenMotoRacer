@@ -1,6 +1,7 @@
 #ifndef R3D_H
 #define R3D_H
 #include <stdint.h>
+#include "ftol.h"
 
 /* The software 3D renderer (NOTES §4.9.3): texture pages, models, the float32 transform
    and projection (0x48c030, 0x49b2c0), the depth buckets (0x49b7f0), and the drawing
@@ -8,18 +9,23 @@
 
 #define R3D_PAGES 64
 
-typedef struct {                /* 0x40 bytes in the game */
-    int kind;                   /* +0x00: the draw kind (16, 21, 38, 39 textured) */
-    int colour;                 /* +0x02: RGB565, for the untextured kinds */
-    int drawn;                  /* +0x3a: the kind as last queued: copies of a model share it */
-    int page;                   /* +0x36 */
-    int flags;                  /* +0x38: bit 1 = sorted 1024 farther */
-    int n;                      /* 3 or 4 corners */
-    int idx[4];                 /* +0x2c */
-    int u[4], v[4];             /* +0x04: texels x 8192 (u/256 x 2^21, 0x49e510) */
-    float ut[4], vt[4];         /* the same in texels, as the race's sub 6 takes them
-                                   (u/256 x 256.0, 0x4a0f90) */
+typedef struct {                /* 0x40 bytes in the game; the narrow fields hold what the
+                                   game's do (a track has thousands of faces: NOTES §4.26) */
+    int16_t kind;               /* +0x00: the draw kind (16, 21, 38, 39 textured) */
+    uint16_t colour;            /* +0x02: RGB565, for the untextured kinds */
+    int16_t drawn;              /* +0x3a: the kind as last queued: copies of a model share it */
+    uint16_t page;              /* +0x36 */
+    uint16_t flags;             /* +0x38: bit 1 = sorted 1024 farther */
+    uint8_t n;                  /* 3 or 4 corners */
+    uint16_t idx[4];            /* +0x2c */
+    float ut[4], vt[4];         /* +0x04: the corners in texels, as the race's sub 6 takes them
+                                   (u/256 x 256.0, 0x4a0f90); the affine kinds' texels x 8192
+                                   (u/256 x 2^21, 0x49e510) are FACE_U: computed where drawn, not
+                                   kept (a track's faces, NOTES §4.26) */
 } Face;
+/* the corner's u and v x 8192 as the game keeps them: ftol(u x 8192.0), exact in float */
+#define FACE_U(f, k) ftolf((f)->ut[k] * 8192.0f)
+#define FACE_V(f, k) ftolf((f)->vt[k] * 8192.0f)
 
 typedef struct {
     int nv, nf;
@@ -33,6 +39,9 @@ extern uint16_t *g_texpage[R3D_PAGES];   /* page objects 0x4f92f8 + n x 0x338: 2
 void r3d_init(void);
 uint16_t *r3d_page(int n);                      /* a page's texels, made if missing */
 int r3d_load_page(int n, const char *path);     /* 0x401160 */
+#ifdef OMR_ESP32
+void r3d_page_to8(int n);                       /* the board: made 8-bit, 256 colours (r3d.c) */
+#endif
 void r3d_free_page(int n);
 /* 0x401160 with flag 0 on a paletted RAW (the bikes' bank 0): the 8-bit texels kept and
    the liveries' palettes, the RAW's own then "<name>.1" .. ".7" (8 at most) */

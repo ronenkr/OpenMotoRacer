@@ -16,6 +16,10 @@ unsigned char *files_read(const char *rel, long *len);
 
 /* a file as the game asks for it ("data\\menu\\bitmap\\title.lez"): from its bank
    (DATA\MENU.BKF, name BITMAP\TITLE.LEZ) first, then loose (0x42ef80) */
+/* the same file opened, at its start (in its bank or alone), *len its length: for reading a big
+   one bit by bit (the ESP32 has no room for a 1.3 MB track whole) */
+#include <stdio.h>
+FILE *dsi_fopen(const char *path, long *len);
 unsigned char *dsi_load(const char *path, long *len);
 
 #endif

@@ -121,8 +121,8 @@ static Face *read_faces(Rd *r, int count, int bones)
         f->page = 0;
         for (k = 0; k < f->n; k++) {
             f->idx[k] = idx[k];
-            f->u[k] = u[k] * 8192;                      /* x 1/256 (0x4232e0), x 2097152 */
-            f->v[k] = v[k] * 8192;
+            f->ut[k] = (float)u[k];                     /* (x 8192: x 1/256 (0x4232e0), x 2097152) */
+            f->vt[k] = (float)v[k];
         }
         if (!tx) {                                      /* no texels: 0x402020, 555 -> 565 */
             if (bones && !behaviour_cd())

@@ -5,6 +5,8 @@
    (cpu.c). */
 #include "prof.h"
 #include "race.h"
+#include "bitmap.h"
+#include "esp32.h"
 #include "pointer.h"
 #include "bikephys.h"
 #include "bikes.h"
@@ -111,6 +113,9 @@ static void screen_set(void)
     int m = g_race_screen;
 #ifdef MISTER_HYBRID
     video_set_half(g_mister_res == MR_640x240);
+#endif
+#ifdef OMR_ESP32
+    m = g_race_screen = 0;      /* the board's LCD: 320x240 only (284x216 shown) */
 #endif
     g_new_screen = 0;
     g_screen_mode = m;
@@ -902,6 +907,7 @@ int race_local(void)
 
 int race_load(char *err, int errsize)
 {
+    bitmap_cache_flush();       /* (the ESP32: the menu's pictures make room for the race's) */
     int k, opponents;
     g_race_steps = 0;
     if (!land_load(g_track, err, errsize))
@@ -1310,7 +1316,21 @@ void race_frame(void)
     /* the original steps once a picture by the time it took, and GOG's -FrameRateMax60
        makes every picture 16 ms (1000 / 60 in integers): 62.5 steps a second of dt 1.6.
        The port runs one such step for every 16 ms of the clock. */
+#ifdef OMR_ESP32
+    {   /* the board: at most 4 steps a picture; behind more than that, the race slows down
+           rather than chasing the clock for ever (a step can take longer than 16 ms there) */
+        long behind = (long)(g_now - g_step_at) / STEP_MS;
+        if (behind > 4) {
+            g_esp_dropped += (unsigned)(behind - 4);
+            g_step_at = g_now - 4 * STEP_MS;
+        }
+    }
+    unsigned long long t_steps = esp32_us();
+#endif
     while (g_now - g_step_at >= STEP_MS) {
+#ifdef OMR_ESP32
+        g_esp_steps++;
+#endif
         g_step_at += STEP_MS;
         memcpy(g_before, g_rider, sizeof g_before);
         camera_keep();
@@ -1328,6 +1348,9 @@ void race_frame(void)
         }
     }
     prof_mark(MARK_STEPS);
+#ifdef OMR_ESP32
+    g_esp_step_us += esp32_us() - t_steps;
+#endif
     a = g_smooth ? (float)(g_now - g_step_at) / STEP_MS : 1.0f;
     for (k = 1; k < g_riders; k++)
         blend(&g_shown[k], &g_before[k], &g_rider[k], a);
@@ -1384,7 +1407,13 @@ void race_frame(void)
 #endif
     }
     prof_mark(MARK_SCENE);
+#ifdef OMR_ESP32
+    unsigned long long t_draw = esp32_us();
+#endif
     r3d_render();
+#ifdef OMR_ESP32
+    g_esp_draw_us += esp32_us() - t_draw;
+#endif
     prof_mark(MARK_RENDER);
 #ifdef MISTER_HYBRID
     if (g_half_rows) {

@@ -20,9 +20,7 @@ static int g_made;
 static void corner(Face *f, int k, int idx, int u, int v)
 {
     f->idx[k] = idx;
-    f->u[k] = u * 8192;                 /* x 1/256 (0x4232e0), x 2097152 */
-    f->v[k] = v * 8192;
-    f->ut[k] = (float)u;
+    f->ut[k] = (float)u;                /* (x 8192: x 1/256 (0x4232e0), x 2097152) */
     f->vt[k] = (float)v;
 }
 

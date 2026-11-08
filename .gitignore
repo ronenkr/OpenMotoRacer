@@ -21,3 +21,10 @@ __pycache__/
 /Moto Racer CD/
 # helper agents' working copies
 /.claude/
+# the ESP32 build (esp32/): its outputs and generated settings
+/esp32/build/
+/esp32/sdkconfig
+/esp32/sdkconfig.old
+/esp32/managed_components/
+# the player's CD image, wherever it is kept
+/data/

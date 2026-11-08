@@ -32,14 +32,33 @@
 #include <unistd.h>
 #endif
 
+#ifdef OMR_ESP32
+/* the board: one speaker through the ES8311 at 22050 Hz, the music as files at that rate */
+#define RATE 22050
+#define MUSIC_RING 16384        /* frames: about 0.75 s */
+#define MUSIC_AHEAD 8192        /* kept queued: 0.37 s */
+#else
 #define RATE 44100
-#define SLOTS 1024              /* CfxServer +0x30 */
 #define MUSIC_RING 65536        /* frames: about 1.5 s */
 #define MUSIC_AHEAD 22050       /* kept queued: half a second */
+#endif
+#define SLOTS 1024              /* CfxServer +0x30 */
 #define MIX_BLOCK 256           /* frames mixed at a time */
 
+#ifdef OMR_ESP32
+/* the board: the game's own 8-bit set of its sounds (its option for slow PCs), kept 8-bit: the
+   race's 16-bit ones were 2.3 MB of its 8 (NOTES §4.26) */
+typedef int8_t pcm_t;
+#define PCM_SCALE 256.0f
+#define SFX_SET "8_Bits"
+#else
+typedef int16_t pcm_t;
+#define PCM_SCALE 1.0f
+#define SFX_SET "16_Bits"
+#endif
+
 typedef struct {
-    int16_t *pcm;               /* mono */
+    pcm_t *pcm;                 /* mono */
     unsigned n;                 /* samples */
     int rate;
 } Sample;
@@ -133,7 +152,7 @@ static void mus_unlock(void)
 /* one voice into the frames' sums */
 static void mix_voice(Buffer *b, float *ls, float *rs, int frames)
 {
-    const int16_t *pcm = b->s->pcm;
+    const pcm_t *pcm = b->s->pcm;
     unsigned n = b->s->n;
     uint64_t pos = b->pos, step = ((uint64_t)b->freq << 32) / RATE;
     float gl = b->gl, gr = b->gr;
@@ -155,6 +174,7 @@ static void mix_voice(Buffer *b, float *ls, float *rs, int frames)
             a += (pcm[at + 1] - a) * f;
         else if (b->loop)
             a += (pcm[0] - a) * f;
+        a *= PCM_SCALE;
         ls[i] += a * gl;
         rs[i] += a * gr;
         pos += step;
@@ -304,7 +324,11 @@ static Sample *read_wav(const char *path)
     }
     for (i = 0; i < s->n; i++) {        /* the first channel (all the files are mono) */
         const unsigned char *q = d + p + (unsigned long)i * (bits / 8 * ch);
+#ifdef OMR_ESP32
+        s->pcm[i] = (pcm_t)(bits == 16 ? (int8_t)q[1] : (int8_t)(q[0] - 128));
+#else
         s->pcm[i] = bits == 16 ? (int16_t)(q[0] | q[1] << 8) : (int16_t)((q[0] - 128) << 8);
+#endif
     }
 out:
     free(d);
@@ -389,7 +413,7 @@ static void load_table(int which, int count, const char *folder)
         int h;
         if (id > 255)
             continue;
-        snprintf(path, sizeof path, "data\\sfx\\16_Bits\\%s%s.wav", folder,
+        snprintf(path, sizeof path, "data\\sfx\\" SFX_SET "\\%s%s.wav", folder,
                  exe_str(exe_u32(a + 8 * k)));
         h = load(path);
         g_handle[id] = h;
@@ -1321,7 +1345,7 @@ void sound_load_named(int id, const char *name)
     char path[256];
     if (!sound_running() || id < 0 || id > 255 || g_handle[id] >= 0)
         return;
-    snprintf(path, sizeof path, "data\\sfx\\16_Bits\\Divers\\%s.wav", name);
+    snprintf(path, sizeof path, "data\\sfx\\" SFX_SET "\\Divers\\%s.wav", name);
     g_handle[id] = load(path);
     lock();
     set_volume(g_handle[id], 0xff);

@@ -41,6 +41,33 @@ static uint8_t *g_pageidx[R3D_PAGES];     /* a paletted page's 8-bit texels (pag
 static uint16_t *g_pagepal[R3D_PAGES];    /* and its palettes, 256 colours each (page +0xc) */
 static int g_npal[R3D_PAGES];             /* how many (page +8) */
 static uint16_t *g_skintex[R3D_PAGES][8]; /* the texels through palette k, made when needed */
+#ifdef OMR_ESP32
+/* The board (NOTES §4.26): a texture is a page's 16-bit texels, or its 8-bit ones and a palette:
+   a bike's liveries are its one page through 8 palettes (no 128 KB copy each), and a track's
+   pages are made 8-bit with their own 256 colours (r3d_page_to8). Half the memory, and half the
+   PSRAM a texel read brings into the cache. */
+typedef struct {
+    const uint16_t *rgb;        /* 16-bit texels, or 0 */
+    const uint8_t *idx;         /* else 8-bit ones */
+    const uint16_t *pal;        /* and their colours */
+} Tex;
+typedef const Tex *TEX;
+static Tex g_tex[R3D_PAGES][8];
+static uint8_t *g_q8idx[R3D_PAGES];      /* a page made 8-bit: its texels */
+static uint16_t *g_q8pal[R3D_PAGES];     /* and palette */
+#define TEX_LOCALS(t) const uint16_t *t_rgb = (t) ? (t)->rgb : 0; \
+    const uint8_t *t_idx = (t) ? (t)->idx : 0; const uint16_t *t_pal = (t) ? (t)->pal : 0; \
+    (void)t_rgb, (void)t_idx, (void)t_pal
+#define S16(i) t_rgb[i]
+#define S8(i) t_pal[t_idx[i]]
+/* a loop over texels, written twice: 16-bit texels and indices into a palette */
+#define TWICE(LOOP) do { if (t_rgb) { LOOP(S16) } else { LOOP(S8) } } while (0)
+#else
+typedef const uint16_t *TEX;
+#define TEX_LOCALS(t) const uint16_t *t_rgb = (t); (void)t_rgb
+#define S16(i) t_rgb[i]
+#define TWICE(LOOP) do { LOOP(S16) } while (0)
+#endif
 
 typedef struct {                /* 0x49b2c0's output record */
     float x, y, z;              /* in the view, x and y times the focal length */
@@ -65,7 +92,7 @@ typedef struct {                /* 0x625790: what its pieces share */
     int first;
     int kind;
     uint16_t colour;
-    const uint16_t *tex;
+    TEX tex;
     float g16[3];               /* sub 6: the steps over 16 pixels */
 } Batch;
 
@@ -185,6 +212,17 @@ uint16_t *r3d_page(int n)
         return 0;
     if (!g_texpage[n])
         g_texpage[n] = calloc(65536, sizeof(uint16_t));
+#ifdef OMR_ESP32
+    if (g_texpage[n]) {                 /* 16-bit again (a page made 8-bit is given up) */
+        free(g_q8idx[n]);
+        free(g_q8pal[n]);
+        g_q8idx[n] = 0;
+        g_q8pal[n] = 0;
+        g_tex[n][0].rgb = g_texpage[n];
+        g_tex[n][0].idx = 0;
+        g_tex[n][0].pal = 0;
+    }
+#endif
     return g_texpage[n];
 }
 
@@ -203,6 +241,13 @@ void r3d_free_page(int n)
             free(g_skintex[n][k]);
             g_skintex[n][k] = 0;
         }
+#ifdef OMR_ESP32
+        free(g_q8idx[n]);
+        free(g_q8pal[n]);
+        g_q8idx[n] = 0;
+        g_q8pal[n] = 0;
+        memset(g_tex[n], 0, sizeof g_tex[n]);
+#endif
     }
 }
 
@@ -301,18 +346,172 @@ const uint16_t *r3d_page_palette(int n, int k)
     return g_pagepal[n] + 256 * (k >= 0 && k < g_npal[n] ? k : 0);
 }
 
+#ifdef OMR_ESP32
+/* ---------------------------------------------------------------- 8-bit pages (the board) */
+typedef struct { uint16_t c; uint16_t n; } Count;   /* a colour and how many texels have it */
+
+static int by_colour(const void *a, const void *b)
+{
+    return (int)*(const uint16_t *)a - (int)*(const uint16_t *)b;
+}
+
+/* the texel layout r5 g5 (at bit 6) b5 as three 5-bit channels */
+#define CH(c, k) ((k) == 0 ? (c) >> 11 & 31 : (k) == 1 ? (c) >> 6 & 31 : (c) & 31)
+
+static int by_ch0(const void *a, const void *b) { return CH(((const Count *)a)->c, 0) - CH(((const Count *)b)->c, 0); }
+static int by_ch1(const void *a, const void *b) { return CH(((const Count *)a)->c, 1) - CH(((const Count *)b)->c, 1); }
+static int by_ch2(const void *a, const void *b) { return CH(((const Count *)a)->c, 2) - CH(((const Count *)b)->c, 2); }
+
+/* A page's 16-bit texels made 8-bit and a palette of 256: exactly when it has 256 colours or
+   fewer, else by median cut. Colour 0 (see-through to the kinds that test it) stays exactly 0
+   and nothing else becomes 0. */
+void r3d_page_to8(int n)
+{
+    uint16_t *src, *sorted = 0, *pal = 0;
+    uint8_t *idx = 0, *map = 0;
+    Count *u = 0;
+    int nu = 0, i, j, k, has0 = 0, first, boxes;
+    struct { int lo, hi; } box[256];
+    if (n < 0 || n >= R3D_PAGES || !(src = g_texpage[n]))
+        return;
+    if (!(sorted = malloc(65536 * 2)) || !(idx = malloc(65536)) || !(pal = calloc(256, 2)))
+        goto out;
+    memcpy(sorted, src, 65536 * 2);
+    qsort(sorted, 65536, 2, by_colour);
+    for (i = 0; i < 65536; i++)                 /* the colours, each once, with their counts */
+        if (!i || sorted[i] != sorted[i - 1])
+            nu++;
+    if (!(u = malloc(sizeof *u * (size_t)nu)) || !(map = malloc((size_t)nu)))
+        goto out;
+    for (i = 0, j = -1; i < 65536; i++) {
+        if (!i || sorted[i] != sorted[i - 1])
+            u[++j].c = sorted[i], u[j].n = 0;
+        if (u[j].n < 0xffff)
+            u[j].n++;
+    }
+    has0 = u[0].c == 0;
+    first = has0;                               /* the colours that are not 0 */
+    if (nu <= 256) {
+        for (i = 0; i < nu; i++)
+            pal[i] = u[i].c, map[i] = (uint8_t)i;
+    } else {
+        /* median cut over the non-zero colours into 256 - has0 boxes: the box with the widest
+           channel cut at its texels' middle along that channel */
+        boxes = 1;
+        box[0].lo = first, box[0].hi = nu;
+        while (boxes < 256 - has0) {
+            int best = -1, bw = 0, bk = 0;
+            for (i = 0; i < boxes; i++) {
+                int mn[3] = { 31, 31, 31 }, mx[3] = { 0, 0, 0 };
+                if (box[i].hi - box[i].lo < 2)
+                    continue;
+                for (j = box[i].lo; j < box[i].hi; j++)
+                    for (k = 0; k < 3; k++) {
+                        int v = CH(u[j].c, k);
+                        mn[k] = v < mn[k] ? v : mn[k];
+                        mx[k] = v > mx[k] ? v : mx[k];
+                    }
+                for (k = 0; k < 3; k++)
+                    if (mx[k] - mn[k] > bw)
+                        bw = mx[k] - mn[k], best = i, bk = k;
+            }
+            if (best < 0)
+                break;
+            {
+                int lo = box[best].lo, hi = box[best].hi, half, acc = 0, total = 0, cut;
+                qsort(u + lo, (size_t)(hi - lo), sizeof *u, bk == 0 ? by_ch0 : bk == 1 ? by_ch1 : by_ch2);
+                for (j = lo; j < hi; j++)
+                    total += u[j].n;
+                half = total / 2;
+                for (cut = lo; cut < hi - 1 && acc + u[cut].n <= half; cut++)
+                    acc += u[cut].n;
+                if (cut == lo)
+                    cut = lo + 1;
+                box[boxes].lo = cut, box[boxes].hi = hi;
+                box[best].hi = cut;
+                boxes++;
+            }
+        }
+        if (has0)
+            pal[0] = 0, map[0] = 0;
+        for (i = 0; i < boxes; i++) {           /* each box's colour: its texels' mean */
+            long t = 0, sum[3] = { 0, 0, 0 };
+            int c;
+            for (j = box[i].lo; j < box[i].hi; j++) {
+                for (k = 0; k < 3; k++)
+                    sum[k] += (long)CH(u[j].c, k) * u[j].n;
+                t += u[j].n;
+            }
+            c = (int)((sum[0] + t / 2) / t) << 11 | (int)((sum[1] + t / 2) / t) << 6 | (int)((sum[2] + t / 2) / t);
+            pal[has0 + i] = (uint16_t)(c ? c : 1);
+        }
+        qsort(u + first, (size_t)(nu - first), sizeof *u, by_colour);   /* (back in colour order) */
+        /* each colour to its nearest palette colour (not always its own box's), the zero apart */
+        for (j = first; j < nu; j++) {
+            int bestd = 1 << 30, bi = has0;
+            for (i = has0; i < has0 + boxes; i++) {
+                int d = 0;
+                for (k = 0; k < 3; k++) {
+                    int e = CH(u[j].c, k) - CH(pal[i], k);
+                    d += e * e;
+                }
+                if (d < bestd)
+                    bestd = d, bi = i;
+            }
+            map[j] = (uint8_t)bi;
+        }
+    }
+    for (i = 0; i < 65536; i++) {               /* each texel by its colour's place in u */
+        int lo = 0, hi = nu - 1, c = src[i];
+        while (lo < hi) {
+            int mid = (lo + hi) / 2;
+            if (u[mid].c < c)
+                lo = mid + 1;
+            else
+                hi = mid;
+        }
+        idx[i] = map[lo];
+    }
+    free(g_texpage[n]);
+    g_texpage[n] = 0;
+    free(g_q8idx[n]);
+    free(g_q8pal[n]);
+    g_q8idx[n] = idx;
+    g_q8pal[n] = pal;
+    g_tex[n][0].rgb = 0;
+    g_tex[n][0].idx = idx;
+    g_tex[n][0].pal = pal;
+    idx = 0, pal = 0;
+out:
+    free(sorted);
+    free(u);
+    free(map);
+    free(idx);
+    free(pal);
+}
+#endif
+
 /* a paletted page seen through palette k: what 0x4a7240 reads, palette[texel] */
-static const uint16_t *skin_texels(int n, int k)
+static TEX skin_texels(int n, int k)
 {
     const uint16_t *pal = r3d_page_palette(n, k);
+#ifndef OMR_ESP32
     int i;
+#endif
     if (!pal)
         return 0;
     k = (int)(pal - g_pagepal[n]) / 256;
+#ifdef OMR_ESP32
+    g_tex[n][k].rgb = 0;                /* (the indices through the palette, as they are) */
+    g_tex[n][k].idx = g_pageidx[n];
+    g_tex[n][k].pal = pal;
+    return &g_tex[n][k];
+#else
     if (!g_skintex[n][k] && (g_skintex[n][k] = malloc(65536 * 2)))
         for (i = 0; i < 65536; i++)
             g_skintex[n][k][i] = pal[g_pageidx[n][i]];
     return g_skintex[n][k];
+#endif
 }
 
 /* ---------------------------------------------------------------- the camera, objects */
@@ -791,7 +990,7 @@ static inline int sub6(int kind)        /* kind table 0x4f1a70: sub 6, the persp
 }
 
 /* a batch closed: its pieces are g_span[first..] */
-static void batch_end(Drawer *w, int first, int kind, const uint16_t *tex, uint16_t colour,
+static void batch_end(Drawer *w, int first, int kind, TEX tex, uint16_t colour,
                       const float g16[3])
 {
     Batch *b;
@@ -810,10 +1009,11 @@ static void batch_end(Drawer *w, int first, int kind, const uint16_t *tex, uint1
 }
 
 static void span(int y, int x0, int x1, int u, int v, int du, int dv, int kind,
-                 const uint16_t *tex, uint16_t colour)
+                 TEX tex, uint16_t colour)
 {
     uint16_t *o = g_screen + y * g_pitch;
     int x, top = -y * g_pitch;
+    TEX_LOCALS(tex);
     if (x0 < top) {                                     /* (above the screen: see span6) */
         u += (top - x0) * du, v += (top - x0) * dv;
         x0 = top;
@@ -863,28 +1063,45 @@ static void span(int y, int x0, int x1, int u, int v, int du, int dv, int kind,
             return;
         }
 #endif
-        for (x = x0; x < x1; x++) {
-            unsigned c = tex[bh << 8 | bl];
-            uint32_t t;
-            if (kind == 0x10)
-                o[x] = (uint16_t)c;
-            else {                                      /* (no blue in 69) */
-                unsigned s = o[x], a = c & 0x1f;        /* each channel towards white by a/32 */
-                o[x] = (uint16_t)(s + (((31 - (s >> 11)) * a >> 5) << 11)
-                                  + (((31 - ((s >> 6) & 31)) * a >> 5) << 6)
-                                  + (kind == 68 ? (31 - (s & 31)) * a >> 5 : 0));
+        if (kind == 0x10) {             /* (the road: most of a picture's pixels) */
+#define LOOP10(S) \
+            for (x = x0; x < x1; x++) { \
+                uint32_t t; \
+                o[x] = (uint16_t)S(bh << 8 | bl); \
+                t = e + de, bl = (bl + (de & 0xff) + (t < e)) & 0xff, e = t; \
+                t = f + df, bh = (bh + (df & 0xff) + (t < f)) & 0xff, f = t; \
             }
-            t = e + de, bl = (bl + (de & 0xff) + (t < e)) & 0xff, e = t;
-            t = f + df, bh = (bh + (df & 0xff) + (t < f)) & 0xff, f = t;
+            TWICE(LOOP10);
+#undef LOOP10
+            return;
         }
+#define LOOP68(S) \
+        for (x = x0; x < x1; x++) { \
+            unsigned c = S(bh << 8 | bl); \
+            uint32_t t; \
+            unsigned s = o[x], a = c & 0x1f;        /* each channel towards white by a/32 */ \
+            o[x] = (uint16_t)(s + (((31 - (s >> 11)) * a >> 5) << 11) \
+                              + (((31 - ((s >> 6) & 31)) * a >> 5) << 6) \
+                              + (kind == 68 ? (31 - (s & 31)) * a >> 5 : 0)); /* (no blue in 69) */ \
+            t = e + de, bl = (bl + (de & 0xff) + (t < e)) & 0xff, e = t; \
+            t = f + df, bh = (bh + (df & 0xff) + (t < f)) & 0xff, f = t; \
+        }
+        TWICE(LOOP68);
+#undef LOOP68
         return;
     }
-#define TEXELS(what) \
+#define TEXLOOP_A(S, what) \
     for (x = x0; x < x1; x++, u += du, v += dv) { \
-        unsigned c = tex[((v >> 13) * 256 + (u >> 13)) & 0xffff]; \
+        unsigned c = S(((v >> 13) * 256 + (u >> 13)) & 0xffff); \
         what; \
-    } \
+    }
+#ifdef OMR_ESP32
+#define TEXELS(what) \
+    if (t_rgb) { TEXLOOP_A(S16, what) } else { TEXLOOP_A(S8, what) } \
     return
+#else
+#define TEXELS(what) TEXLOOP_A(S16, what) return
+#endif
     switch (kind) {
     case 0x25: TEXELS(if (c) o[x] = colour);                    /* 0x4a50c0: the face's colour */
     case 0x26: TEXELS(if (c) o[x] = (uint16_t)c);               /* 0x4a5330 */
@@ -898,12 +1115,13 @@ static void span(int y, int x0, int x1, int u, int v, int du, int dv, int kind,
     default: TEXELS(o[x] = (uint16_t)c);
     }
 #undef TEXELS
+#undef TEXLOOP_A
 }
 
 /* 0x49d9e0 (opaque: draw the free pieces and close them) and 0x49dbf0 (see-through:
    keep the free pieces for the end) */
 static void row(Drawer *w, int y, int x0, int x1, int u, int v, int du, int dv, int kind,
-                const uint16_t *tex, int deferred)
+                TEX tex, int deferred)
 {
     int16_t out[2 * FREE_MAX], *fr = g_row[y].p;
     int i, n, nf = g_row[y].n, first;
@@ -953,7 +1171,7 @@ typedef struct {
 } Corner;
 
 /* 0x49dde0: an affine triangle, 13-bit fixed point, one du/dx and dv/dx */
-static void triangle(Drawer *w, Corner c0, Corner c1, Corner c2, int kind, const uint16_t *tex,
+static void triangle(Drawer *w, Corner c0, Corner c1, Corner c2, int kind, TEX tex,
                      uint16_t colour)
 {
     int x0, y0, u0, v0, x1, y1, u1, v1, x2, y2, u2, v2, A, B, D, du, dv, r, nrow = 0, deferred;
@@ -1219,7 +1437,7 @@ typedef struct {
 
 typedef struct {                /* what one triangle's rows share */
     int kind;
-    const uint16_t *tex;
+    TEX tex;
     uint16_t colour;
     float g[3], g16[3];         /* d(u/z, v/z, 1/z)/dx and 16 times it */
 } Tri6;
@@ -1227,8 +1445,9 @@ typedef struct {                /* what one triangle's rows share */
 /* 0x4a5c40 and its twins: (u, v) = 8192 (u/z, v/z) / (1/z) exactly every 16 pixels,
    stepped linearly in between; u and v run on from block to block */
 static void span6(int y, int x0, int x1, const float e[3], const float g16[3], int kind,
-                  const uint16_t *tex, uint16_t colour)
+                  TEX tex, uint16_t colour)
 {
+    TEX_LOCALS(tex);
     uint16_t *o = g_screen + y * g_pitch + x0;
     int n = x1 - x0, k, room = (g_scr_h - y) * g_pitch - x0, skip = -y * g_pitch - x0;
     float uz = e[0], vz = e[1], rz = e[2];
@@ -1270,12 +1489,18 @@ static void span6(int y, int x0, int x1, const float e[3], const float g16[3], i
         n -= k;
         for (; k > 0 && skip > 0; k--, skip--, o++, u += du, v += dv)
             ;
-#define TEXELS(what) \
+#define TEXLOOP_B(S, what) \
         for (; k > 0; k--, o++, u += du, v += dv) { \
-            unsigned c = tex[((v >> 13) * 256 + (u >> 13)) & 0xffff]; \
+            unsigned c = S(((v >> 13) * 256 + (u >> 13)) & 0xffff); \
             what; \
-        } \
+        }
+#ifdef OMR_ESP32
+#define TEXELS(what) \
+        if (t_rgb) { TEXLOOP_B(S16, what) } else { TEXLOOP_B(S8, what) } \
         break
+#else
+#define TEXELS(what) TEXLOOP_B(S16, what) break
+#endif
         switch (kind) {
         case 31: TEXELS(*o = (uint16_t)c);                          /* 0x4a5c40 */
         case 32: TEXELS(*o = (uint16_t)((c >> 1) & HALF));          /* 0x4a5e90 */
@@ -1286,6 +1511,7 @@ static void span6(int y, int x0, int x1, const float e[3], const float g16[3], i
         default: o += k, u += (uint32_t)k * du, v += (uint32_t)k * dv;
         }
 #undef TEXELS
+#undef TEXLOOP_B
     }
 }
 
@@ -1545,7 +1771,7 @@ static Corner6 clip6(const Point *b, const Corner6 *cb, const Point *f, const Co
 }
 
 /* 0x4a0f90: a fan, each triangle cut at the near plane */
-static void face6(Drawer *w, const Face *f, int kind, int base, const uint16_t *tex)
+static void face6(Drawer *w, const Face *f, int kind, int base, TEX tex)
 {
     Tri6 t;
     int k;
@@ -1584,7 +1810,7 @@ static void face6(Drawer *w, const Face *f, int kind, int base, const uint16_t *
 static void face(Drawer *w, const Entry *e)
 {
     const Face *f = e->f;
-    const uint16_t *tex;
+    TEX tex;
     uint16_t colour = (uint16_t)(f->colour & 0xffdf);
     int k, kind = f->drawn, base = e->base;
     if (e->skin >= 0) {         /* 0x4aef20 by face +0x3a, with the face's palette */
@@ -1624,7 +1850,12 @@ static void face(Drawer *w, const Entry *e)
         } else if (!sub6(kind) && !no_paint(kind) && kind != 0x10 && kind != 0x15 && kind != 0x25
                    && kind != 0x26 && kind != 0x27 && kind != 0x2c && kind != 68 && kind != 69)
             return;                                     /* (no row in 0x4f1a70, as 0xd) */
-        tex = f->page >= 0 && f->page < R3D_PAGES ? g_texpage[f->page] : 0;
+#ifdef OMR_ESP32
+        tex = f->page < R3D_PAGES
+              && (g_tex[f->page][0].rgb || g_tex[f->page][0].idx) ? &g_tex[f->page][0] : 0;
+#else
+        tex = f->page < R3D_PAGES ? g_texpage[f->page] : 0;
+#endif
     }
     if (!tex && kind != 12 && !no_paint(kind))
         return;
@@ -1641,7 +1872,7 @@ static void face(Drawer *w, const Entry *e)
         for (i = 0; i < 3; i++) {
             p[i] = &g_pt[base + f->idx[j[i]]];
             c[i].sx = p[i]->sx, c[i].sy = p[i]->sy;
-            c[i].u = f->u[j[i]], c[i].v = f->v[j[i]];
+            c[i].u = FACE_U(f, j[i]), c[i].v = FACE_V(f, j[i]);
             behind[i] = p[i]->z < g_near;
             nb += behind[i];
         }

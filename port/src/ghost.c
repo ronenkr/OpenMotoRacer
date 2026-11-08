@@ -31,9 +31,27 @@ typedef struct {
     float clock;                /* +0x14 */
 } Recording;
 
+#ifdef OMR_ESP32
+/* the ESP32: the 1 MB taken only once a time attack runs (NOTES §4.26) */
+static Recording g_ghost = { 0, 0, MAX_SAMPLES, 0, 0.0f, 0.0f };   /* 0x52c0d8 */
+static Recording g_run = { 0, 0, MAX_SAMPLES, 0, 0.0f, 0.0f };     /* 0x52c0f0 */
+static int store(void)
+{
+    if (!g_ghost.s) {
+        Sample *s = calloc(2 * MAX_SAMPLES, sizeof *s);
+        if (!s)
+            return 0;
+        g_ghost.s = s;
+        g_run.s = s + MAX_SAMPLES;
+    }
+    return 1;
+}
+#else
 static Sample g_store[2][MAX_SAMPLES];
 static Recording g_ghost = { 0, 0, MAX_SAMPLES, g_store[0], 0.0f, 0.0f };   /* 0x52c0d8 */
 static Recording g_run = { 0, 0, MAX_SAMPLES, g_store[1], 0.0f, 0.0f };     /* 0x52c0f0 */
+#define store() 1
+#endif
 
 static void reset(Recording *t)     /* 0x4191a0 */
 {
@@ -89,6 +107,8 @@ static int read_word(FILE *f, int *v)
 
 void ghost_load(unsigned char *record)
 {
+    if (!store())
+        return;
     char name[300];
     FILE *f;
     int v, count = 0, max = 0, i;
@@ -151,7 +171,7 @@ void ghost_record(float dt, float speed, const float at[3], const float dir[3], 
                   int crash, const float v[3])
 {
     Sample *s;
-    if (g_run.count >= g_run.max)
+    if (g_run.count >= g_run.max || !store())
         return;
     g_run.clock = (float)((double)g_run.clock + dt);
     s = &g_run.s[g_run.count++];
@@ -166,6 +186,8 @@ void ghost_record(float dt, float speed, const float at[3], const float dir[3], 
 
 void ghost_take(int ms)
 {
+    if (!store())
+        return;
     g_run.total = (float)ms;
     memcpy(g_ghost.s, g_run.s, (size_t)g_run.count * sizeof(Sample));   /* 0x4190d0 */
     g_ghost.count = g_run.count;

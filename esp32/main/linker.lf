@@ -1,0 +1,9 @@
+# The game's big static arrays (screen, s-buffer, spans, ghost, replay...) in PSRAM; the board's
+# own and the hot small tables in internal RAM (NOTES §4.26).
+[mapping:omr_bss]
+archive: libmain.a
+entries:
+    * (extram_bss)
+    board (default)
+    omr_esp32 (default)
+    sdl_esp32 (default)

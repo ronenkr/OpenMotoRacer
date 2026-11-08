@@ -93,7 +93,7 @@ static void unlock_frame(int id)
         g_shown = 1;
     }
     menu_begin_frame();
-    if (g_picture.pix)
+    if (bitmap_loaded(&g_picture))
         bitmap_draw(&g_picture, BM_OWN, 100, 0);
     menu_draw_buttons();
     if (menu_pressed() == 0) {
