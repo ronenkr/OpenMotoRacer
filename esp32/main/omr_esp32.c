@@ -30,6 +30,7 @@
 #include "race.h"
 #include "dialog.h"
 #include "esp32.h"
+#include "r3d.h"
 
 static const char *TAG = "omr";
 
@@ -135,6 +136,7 @@ static void scale(const uint16_t *src, int w, int h, int pitch)
 static SemaphoreHandle_t g_scale_go, g_scale_done;
 static volatile int g_scaling;          /* a picture handed over, not yet scaled */
 static int g_direct;                    /* the race's picture being sent from the game's screen */
+static int g_skip_present;              /* the race showed its picture itself this frame */
 static const uint16_t *g_sc_src;
 static int g_sc_w, g_sc_h, g_sc_pitch;
 
@@ -148,8 +150,39 @@ static void present_task(void *arg)
     }
 }
 
+/* the race's pipeline (race.c): its picture sent now, from the game's screen; the main loop's
+   present this frame passes */
+void esp32_present_race(const void *pixels)
+{
+    if (g_shot_wanted) {
+        g_shot_wanted = 0;
+        g_shot_busy = 1;
+        vTaskDelay(pdMS_TO_TICKS(20));
+        shot(pixels, PIC_W, PIC_H, PIC_W);
+        g_shot_busy = 0;
+    }
+    g_presents++;
+    board_lcd_wait_pending(1);
+    board_lcd_draw(0, PIC_Y, PIC_W, PIC_H, pixels);
+    g_skip_present = 1;
+}
+
+void esp32_skip_present(void)
+{
+    g_skip_present = 1;
+}
+
+void esp32_screen_free(const void *pixels)
+{
+    int64_t t0 = esp_timer_get_time();
+    (void)pixels;
+    board_lcd_wait_pending(1);          /* (the one just queued may still go: not that picture) */
+    g_wait_us += esp_timer_get_time() - t0;
+}
+
 void esp32_present_wait(void)
 {
+    r3d_finish();                       /* (a race's picture still being drawn on core 1) */
     if (g_scaling) {
         xSemaphoreTake(g_scale_done, portMAX_DELAY);
         g_scaling = 0;
@@ -164,6 +197,10 @@ void esp32_present_wait(void)
 
 void esp32_present(const void *pixels, int w, int h, int pitch)
 {
+    if (g_skip_present) {               /* (the race has shown it: race.c's pipeline) */
+        g_skip_present = 0;
+        return;
+    }
     esp32_present_wait();
     if (g_shot_wanted) {
         g_shot_wanted = 0;
@@ -466,7 +503,7 @@ static void console_task(void *arg)
 
 unsigned long long g_esp_step_us, g_esp_draw_us;
 unsigned g_esp_steps, g_esp_dropped;
-unsigned long long g_esp_t[10], g_esp_mark;
+unsigned long long g_esp_t[16], g_esp_mark;
 
 unsigned long long esp32_us(void)
 {
@@ -493,8 +530,18 @@ static void perf_task(void *arg)
                  g_esp_t[0] / 1000, g_esp_t[1] / 1000, g_esp_t[2] / 1000, g_esp_t[3] / 1000,
                  g_esp_t[4] / 1000, g_esp_t[5] / 1000, g_esp_t[6] / 1000, g_esp_t[7] / 1000,
                  g_esp_t[8] / 1000);
+        ESP_LOGI(TAG, "frame ms: blend/cam %llu horizon %llu track %llu bikes %llu fx/hud3d %llu hud2d %llu",
+                 g_esp_t[9] / 1000, g_esp_t[10] / 1000, g_esp_t[11] / 1000, g_esp_t[12] / 1000,
+                 g_esp_t[13] / 1000, g_esp_t[14] / 1000);
         memset(g_esp_t, 0, sizeof g_esp_t);
-        sound_report();
+        {
+            extern unsigned long long g_esp_r0_us, g_esp_r1_us, g_esp_rwait_us;
+            extern int r3d_band_split(void);
+            ESP_LOGI(TAG, "3D rows: core 0 %llu ms, core 1 %llu ms, waited %llu ms, split at %d", g_esp_r0_us / 1000,
+                     g_esp_r1_us / 1000, g_esp_rwait_us / 1000, r3d_band_split());
+            g_esp_r0_us = g_esp_r1_us = g_esp_rwait_us = 0;
+
+        }
         {
             float g[3] = { 0, 0, 0 };
             board_accel(g);

@@ -920,8 +920,18 @@ int race_local(void)
     return g_player;
 }
 
+#ifdef OMR_ESP32
+static int g_esp_pending, g_esp_pending_flags;   /* a picture on core 1 (race_frame's pipeline) */
+static int g_bdraw = -1, g_bshown = -1, g_bbuild;   /* video_race_buffer's: drawn, shown, built */
+#endif
+
 int race_load(char *err, int errsize)
 {
+#ifdef OMR_ESP32
+    r3d_finish();
+    g_esp_pending = 0;
+    g_bdraw = g_bshown = -1;
+#endif
     bitmap_cache_flush();       /* (the ESP32: the menu's pictures make room for the race's) */
     int k, opponents;
     g_race_steps = 0;
@@ -1295,6 +1305,41 @@ int race_label_place(int k, int *sx, int *sy)
     return 1;
 }
 
+/* the picture's 2D over its 3D: the HUD, the messages, the dialogs, the credits, the pointer */
+static void race_2d(int flags)
+{
+    if (!(flags & RACE_DRAW_HUD)) {
+        text_update();
+        if (flags & RACE_DRAW_LIST1)
+            text_draw_list(1);
+    } else if (!g_winner_sequence) {    /* race+0xc: none of it under the credits */
+        hud_draw(flags & RACE_DRAW_DIALS);
+        text_update();
+        text_draw();            /* the race's messages */
+    }
+    dialog_draw();
+    credits_frame();
+    pointer_draw();
+}
+
+#ifdef OMR_ESP32
+/* The board's pipeline (NOTES §4.26): a picture's 3D is drawn by core 1 (from a copy of the
+   lists) while core 0 does the next steps and builds the next scene on another picture; then the
+   first's 2D, and it goes to the LCD. (What is shown is a picture behind the game, some 35 ms;
+   its HUD the newer state.) */
+static void esp_finish(void)            /* the picture on core 1 finished here, to be shown as usual */
+{
+    if (g_esp_pending) {
+        r3d_finish();
+        video_use(video_race_buffer(g_bdraw));
+        race_2d(g_esp_pending_flags);
+        g_bshown = g_bdraw;
+        g_bdraw = -1;
+        g_esp_pending = 0;
+    }
+}
+#endif
+
 void race_frame(void)
 {
 #ifdef MISTER_HYBRID
@@ -1306,8 +1351,10 @@ void race_frame(void)
     static const float zero[3];
     int i, k, sec, flags;
 #ifdef OMR_ESP32
-    if (g_paused || g_new_screen || g_events)   /* (these draw before the steps) */
+    if (g_paused || g_new_screen || g_events) { /* (these draw before the steps) */
+        esp_finish();
         esp32_present_wait();
+    }
 #endif
     if (g_paused) {             /* the last picture stays; no time passes */
         g_step_at += g_now - g_last_now;
@@ -1373,7 +1420,15 @@ void race_frame(void)
     prof_mark(MARK_STEPS);
 #ifdef OMR_ESP32
     g_esp_step_us += esp32_us() - t_steps;
-    esp32_present_wait();       /* (the last picture scaled on core 1 meanwhile) */
+    if (!g_esp_pending)
+        esp32_present_wait();
+    for (g_bbuild = 0; g_bbuild == g_bdraw || g_bbuild == g_bshown; g_bbuild++)
+        ;                       /* the next scene on the picture neither drawn nor shown */
+    esp32_screen_free(video_race_buffer(g_bbuild));
+    video_use(video_race_buffer(g_bbuild));
+#endif
+#ifdef OMR_ESP32
+    g_esp_mark = esp32_us();
 #endif
     a = g_smooth ? (float)(g_now - g_step_at) / STEP_MS : 1.0f;
     for (k = 1; k < g_riders; k++)
@@ -1395,12 +1450,15 @@ void race_frame(void)
         r3d_screen();
     }
 #endif
+    ESP_T(9);                           /* blend, camera, section */
     focal = FOCAL * camera_zoom();
     horizon_draw((const float (*)[3])c, zero, eye[1], g_land.horizon_offset,
                  g_land.horizon_scale, focal);
+    ESP_T(10);                          /* the horizon */
     r3d_race(g_detail);
     r3d_focal(focal);
     land_draw(sec, (const float (*)[3])c, eye);
+    ESP_T(11);                          /* the track queued */
     bike3d_lighting(1);
     for (i = 1; i < g_riders; i++)
         if (i == g_follow && onboard_now()) {
@@ -1411,6 +1469,7 @@ void race_frame(void)
             shadow_draw(&g_shown[i], i);
         }
     bike3d_lighting(0);
+    ESP_T(12);                          /* the bikes and shadows queued */
     effects_draw(g_detail, a);
     hud_bike(b);
     if (flags & RACE_DRAW_DIALS) {      /* the drawing flags' bit 3: off under a dialog */
@@ -1431,14 +1490,34 @@ void race_frame(void)
 #endif
     }
     prof_mark(MARK_SCENE);
+    ESP_T(13);                          /* effects, the 3D HUD, signs */
 #ifdef OMR_ESP32
     unsigned long long t_draw = esp32_us();
+    if (g_esp_pending) {        /* the last scene, drawn on core 1 meanwhile: its 2D, then shown */
+        r3d_finish();
+        video_use(video_race_buffer(g_bdraw));
+        race_2d(g_esp_pending_flags);
+        esp32_present_race(g_screen);
+        g_bshown = g_bdraw;
+        video_use(video_race_buffer(g_bbuild));
+    } else
+        esp32_skip_present();   /* (the first: nothing to show yet) */
+    r3d_render_async();         /* (core 1 draws this one; its 2D and showing next time) */
+    g_esp_draw_us += esp32_us() - t_draw;
+    g_bdraw = g_bbuild;
+    g_esp_pending = 1;
+    g_esp_pending_flags = flags;
+    sound_update();
+    return;
 #endif
     r3d_render();
 #ifdef OMR_ESP32
     g_esp_draw_us += esp32_us() - t_draw;
 #endif
     prof_mark(MARK_RENDER);
+#ifdef OMR_ESP32
+    g_esp_mark = esp32_us();
+#endif
 #ifdef MISTER_HYBRID
     if (g_half_rows) {
         video_half_3d(0);
@@ -1448,17 +1527,7 @@ void race_frame(void)
         r3d_screen();
     }
 #endif
-    if (!(flags & RACE_DRAW_HUD)) {
-        text_update();
-        if (flags & RACE_DRAW_LIST1)
-            text_draw_list(1);
-    } else if (!g_winner_sequence) {    /* race+0xc: none of it under the credits */
-        hud_draw(flags & RACE_DRAW_DIALS);
-        text_update();
-        text_draw();            /* the race's messages */
-    }
-    dialog_draw();
-    credits_frame();
-    pointer_draw();
+    race_2d(flags);
     sound_update();             /* 0x405f30: the voice queue */
+    ESP_T(14);                          /* the HUD, texts, dialogs */
 }

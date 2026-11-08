@@ -25,6 +25,10 @@
 #include <unistd.h>
 #endif
 #endif
+#include "esp32.h"
+#if defined(OMR_ESP32) && defined(R3D_TWO)
+#define R3D_PIPE 1      /* the board: a scene drawn on core 1 from a copy while the next is built */
+#endif
 #include "fastfloat.h"      /* (last: the ESP32's single precision) */
 
 #define W g_scr_w
@@ -91,6 +95,9 @@ typedef struct {
     int skin;                   /* 0x49ca70: the palette of a paletted page's face; -1 none */
     int dark;                   /* its points' light word (0x49b2c0) is below 0x3e000 */
     int next;
+#ifdef R3D_PIPE
+    int kind;                   /* its face's kind as last queued, taken when drawing starts */
+#endif
 } Entry;
 
 typedef struct {                /* a see-through piece put off till last */
@@ -135,6 +142,22 @@ static int g_bucket_lo, g_bucket_hi = BUCKETS - 1;   /* the ones in use */
 static Entry g_entry[ENTRIES];
 static int g_nentry;
 static FreeRow g_row[SCREEN_MAX_H];
+#ifdef R3D_PIPE
+/* what the drawing reads: the lists themselves, or (r3d_render_async) a copy of them, so the next
+   scene can be built meanwhile; and the picture it draws on */
+static Point *g_dpt = g_pt;
+static Entry *g_dentry = g_entry;
+static int *g_dhead = g_head;
+static int g_dlo, g_dhi = -1;
+static uint16_t *g_dscreen;
+#else
+#define g_dpt g_pt
+#define g_dentry g_entry
+#define g_dhead g_head
+#define g_dlo g_bucket_lo
+#define g_dhi g_bucket_hi
+#define g_dscreen g_screen
+#endif
 /* (int)nearbyintf(x): the ARM has it in one instruction, the library a call */
 static inline int round_int(float x)
 {
@@ -706,6 +729,14 @@ void r3d_begin(void)
     unsigned i;
     g_npt = 0;
     g_nentry = 0;
+#ifdef R3D_PIPE
+    /* (the board: the lists only; the drawing's own state at the start of each, draw_start) */
+    for (y = g_bucket_lo; y <= g_bucket_hi; y++)
+        g_head[y] = -1;
+    g_bucket_lo = BUCKETS, g_bucket_hi = -1;
+    (void)i;
+    return;
+#endif
     for (i = 0; i < sizeof g_draw / sizeof g_draw[0]; i++) {
         g_draw[i].nspan = 0;
         g_draw[i].nbatch = 0;
@@ -1022,7 +1053,7 @@ static void batch_end(Drawer *w, int first, int kind, TEX tex, uint16_t colour,
 static void span(int y, int x0, int x1, int u, int v, int du, int dv, int kind,
                  TEX tex, uint16_t colour)
 {
-    uint16_t *o = g_screen + y * g_pitch;
+    uint16_t *o = g_dscreen + y * g_pitch;
     int x, top = -y * g_pitch;
     TEX_LOCALS(tex);
     if (x0 < top) {                                     /* (above the screen: see span6) */
@@ -1295,7 +1326,7 @@ static Corner clip(const Point *b, int ub, int vb, const Point *f, int uf, int v
 static void flat_row(int y, int xl, int xr, uint16_t c)
 {
     int16_t out[2 * FREE_MAX];
-    uint16_t *o = g_screen + y * g_pitch;
+    uint16_t *o = g_dscreen + y * g_pitch;
     int i = 0, n = 0, nf = g_row[y].n, x, top = -y * g_pitch;
 #define KEEP(a, b) do { if (n < FREE_MAX) out[2 * n] = (int16_t)(a), out[2 * n + 1] = (int16_t)(b), n++; } while (0)
 #define FILL(from, to) for (x = (from) < top ? top : (from); x < (to); x++) o[x] = c    /* (see span6) */
@@ -1420,7 +1451,7 @@ static void flat_face(const Drawer *w, const Face *f, int base, int colour)
         const Point *p[3];
         Corner q[3];
         for (i = 0; i < 3; i++) {
-            p[i] = &g_pt[base + f->idx[j[i]]];
+            p[i] = &g_dpt[base + f->idx[j[i]]];
             q[i].sx = p[i]->sx, q[i].sy = p[i]->sy, q[i].u = q[i].v = 0;
             behind[i] = p[i]->z < g_near;
             nb += behind[i];
@@ -1459,7 +1490,7 @@ static void span6(int y, int x0, int x1, const float e[3], const float g16[3], i
                   TEX tex, uint16_t colour)
 {
     TEX_LOCALS(tex);
-    uint16_t *o = g_screen + y * g_pitch + x0;
+    uint16_t *o = g_dscreen + y * g_pitch + x0;
     int n = x1 - x0, k, room = (g_scr_h - y) * g_pitch - x0, skip = -y * g_pitch - x0;
     float uz = e[0], vz = e[1], rz = e[2];
     double z, rze;
@@ -1792,7 +1823,7 @@ static void face6(Drawer *w, const Face *f, int kind, int base, TEX tex)
         const Point *p[3];
         Corner6 c[3];
         for (i = 0; i < 3; i++) {
-            p[i] = &g_pt[base + f->idx[j[i]]];
+            p[i] = &g_dpt[base + f->idx[j[i]]];
             c[i].sx = p[i]->sx, c[i].sy = p[i]->sy;
             c[i].rz = (float)(1.0 / p[i]->z);
             c[i].uz = (float)((double)f->ut[j[i]] * c[i].rz);
@@ -1823,7 +1854,11 @@ static void face(Drawer *w, const Entry *e)
     const Face *f = e->f;
     TEX tex;
     uint16_t colour = (uint16_t)(f->colour & 0xffdf);
+#ifdef R3D_PIPE
+    int k, kind = e->kind, base = e->base;
+#else
     int k, kind = f->drawn, base = e->base;
+#endif
     if (e->skin >= 0) {         /* 0x4aef20 by face +0x3a, with the face's palette */
         const uint16_t *pal = r3d_page_palette(f->page, e->skin);
         colour = f->colour < 256 ? pal[f->colour] : (uint16_t)f->colour;
@@ -1881,7 +1916,7 @@ static void face(Drawer *w, const Entry *e)
         const Point *p[3];
         Corner c[3];
         for (i = 0; i < 3; i++) {
-            p[i] = &g_pt[base + f->idx[j[i]]];
+            p[i] = &g_dpt[base + f->idx[j[i]]];
             c[i].sx = p[i]->sx, c[i].sy = p[i]->sy;
             c[i].u = FACE_U(f, j[i]), c[i].v = FACE_V(f, j[i]);
             behind[i] = p[i]->z < g_near;
@@ -1907,14 +1942,14 @@ static void face(Drawer *w, const Entry *e)
 static void draw_rows(Drawer *w)
 {
     int b, e, i, n = 0;
-    for (b = g_bucket_lo; b <= g_bucket_hi; b++)
-        for (e = g_head[b]; e >= 0; e = g_entry[e].next) {
+    for (b = g_dlo; b <= g_dhi; b++)
+        for (e = g_dhead[b]; e >= 0; e = g_dentry[e].next) {
 #ifdef __arm__
-            if (g_entry[e].next >= 0)                   /* (the next face asked for ahead) */
-                __builtin_prefetch(g_entry[g_entry[e].next].f);
+            if (g_dentry[e].next >= 0)                  /* (the next face asked for ahead) */
+                __builtin_prefetch(g_dentry[g_dentry[e].next].f);
 #endif
             if (n++ <= FACES_MAX)
-                face(w, &g_entry[e]);
+                face(w, &g_dentry[e]);
         }
     w->batch[w->nbatch].first = w->nspan;
     for (b = w->nbatch - 1; b >= 0; b--) {              /* 0x4af130: the last first */
@@ -1934,13 +1969,19 @@ static void draw_rows(Drawer *w)
 /* The ESP32's second core draws every other row (NOTES §4.26), woken by a semaphore each
    picture; the same rows and pixels as the MiSTer's below. */
 static SemaphoreHandle_t g_go_sem, g_done_sem;
+static Drawer *volatile g_job;          /* what core 1 draws next: half the rows, or all */
+static int g_async;                     /* a whole picture being drawn by core 1 alone */
+extern unsigned long long g_esp_r1_us;
 
 static void second_core(void *arg)
 {
     (void)arg;
     for (;;) {
+        unsigned long long t0;
         xSemaphoreTake(g_go_sem, portMAX_DELAY);
-        draw_rows(&g_draw[1]);
+        t0 = esp32_us();
+        draw_rows(g_job);
+        g_esp_r1_us += esp32_us() - t0;
         xSemaphoreGive(g_done_sem);
     }
 }
@@ -1958,14 +1999,109 @@ void r3d_two_cpus(int (*pin)(void))
         g_two = 1;
 }
 
+unsigned long long g_esp_r0_us, g_esp_r1_us, g_esp_rwait_us;   /* the readout: each core's rows, the wait */
+
 static void draw_both(int rows)
 {
+    unsigned long long t0, t1;
     g_draw[0].mask = g_draw[1].mask = 2 * rows - 1;
     g_draw[0].val = 0;
     g_draw[1].val = rows;
+    g_job = &g_draw[1];
     xSemaphoreGive(g_go_sem);
+    t0 = esp32_us();
     draw_rows(&g_draw[0]);
+    t1 = esp32_us();
+    g_esp_r0_us += t1 - t0;
     xSemaphoreTake(g_done_sem, portMAX_DELAY);
+    g_esp_rwait_us += esp32_us() - t1;
+}
+
+/* a drawing's start: its drawers' pieces and the rows' free lists afresh */
+static void draw_start(void)
+{
+    unsigned i;
+    int y;
+    for (i = 0; i < sizeof g_draw / sizeof g_draw[0]; i++) {
+        g_draw[i].nspan = 0;
+        g_draw[i].nbatch = 0;
+        g_draw[i].room = 1;
+    }
+    for (y = 0; y < H; y++) {
+        g_row[y].p[0] = 0;
+        g_row[y].p[1] = (int16_t)W;
+        g_row[y].n = 1;
+    }
+}
+
+/* what the drawing reads: the lists (copy 0), or a copy of what they hold (1); each entry's kind
+   as its face was last queued (the copies of a model share it, as the game's do) */
+static Point *g_cpt;
+static Entry *g_centry;
+static int g_ncpt, g_ncentry;
+static int g_chead[BUCKETS];
+
+static int use_lists(int copy)
+{
+    int i;
+    for (i = 0; i < g_nentry; i++)
+        g_entry[i].kind = g_entry[i].f->drawn;
+    if (!copy) {
+        g_dpt = g_pt, g_dentry = g_entry, g_dhead = g_head;
+    } else {
+        if (g_npt > g_ncpt) {           /* (grown as needed: a race holds some 3000 points) */
+            Point *n = realloc(g_cpt, sizeof *n * (size_t)(g_npt + 512));
+            if (!n)
+                return 0;
+            g_cpt = n, g_ncpt = g_npt + 512;
+        }
+        if (g_nentry > g_ncentry) {
+            Entry *n = realloc(g_centry, sizeof *n * (size_t)(g_nentry + 512));
+            if (!n)
+                return 0;
+            g_centry = n, g_ncentry = g_nentry + 512;
+        }
+        memcpy(g_cpt, g_pt, sizeof *g_pt * (size_t)g_npt);
+        memcpy(g_centry, g_entry, sizeof *g_entry * (size_t)g_nentry);
+        if (g_bucket_lo <= g_bucket_hi)
+            memcpy(g_chead + g_bucket_lo, g_head + g_bucket_lo,
+                   sizeof *g_head * (size_t)(g_bucket_hi - g_bucket_lo + 1));
+        g_dpt = g_cpt, g_dentry = g_centry, g_dhead = g_chead;
+    }
+    g_dlo = g_bucket_lo, g_dhi = g_bucket_hi;
+    g_dscreen = g_screen;
+    draw_start();
+    return 1;
+}
+
+/* The race on the board (NOTES §4.26): core 1 draws the scene from a copy of the lists while core
+   0 builds the next one; r3d_finish waits for it. */
+void r3d_render_async(void)
+{
+    r3d_finish();
+    if (!g_two || video_no_3d() || !use_lists(1)) {
+        r3d_render();
+        return;
+    }
+    g_draw[0].mask = 0;
+    g_draw[0].val = 0;
+    g_job = &g_draw[0];
+    g_async = 1;
+    xSemaphoreGive(g_go_sem);
+    r3d_begin();                        /* (the lists free for the next scene) */
+}
+
+void r3d_finish(void)
+{
+    if (!g_async)
+        return;
+    xSemaphoreTake(g_done_sem, portMAX_DELAY);
+    g_async = 0;
+}
+
+int r3d_band_split(void)
+{
+    return -1;                          /* (rows interleaved: bands measured no better, NOTES §4.26) */
 }
 #elif defined(R3D_TWO)
 /* The second CPU (hybrid/CLAUDE.md: the helpers' CPU, Main_MiSTer's, which gives way to our
@@ -2025,6 +2161,10 @@ static void draw_both(int rows)
 
 void r3d_render(void)
 {
+#ifdef R3D_PIPE
+    r3d_finish();                       /* (one being drawn in the background first) */
+    use_lists(0);
+#endif
     if (video_no_3d()) {                                /* 0x49ad90: another program in front */
         r3d_begin();
         return;

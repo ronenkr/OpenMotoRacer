@@ -99,6 +99,10 @@ void r3d_screen_faces(int base, int nf, const Face *f, float key);
 /* the same with the kinds through a detail row (0x4f1a18 = 0; detail < 0: the race's own) */
 void r3d_key_faces(int base, int nf, const Face *f, float key, int detail);
 void r3d_render(void);                          /* 0x49ad90 */
+#ifdef OMR_ESP32
+void r3d_render_async(void);                    /* the board: drawn by core 1 while core 0 goes on */
+void r3d_finish(void);                          /* and waited for (nothing pending: returns) */
+#endif
 #ifdef R3D_TWO
 void r3d_two_cpus(int (*pin)(void));            /* a second thread draws every other row; pin puts it on its CPU */
 #endif

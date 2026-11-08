@@ -49,4 +49,9 @@ extern int g_hud_top, g_hud_bottom;     /* the OSD's HUD margins, in this screen
 #define g_hud_bottom 0
 #endif
 
+#ifdef OMR_ESP32
+uint16_t *video_race_buffer(int k);     /* the board: the race's three pictures, 0..2 */
+void video_use(uint16_t *screen);       /* drawing on that one */
+#endif
+
 #endif

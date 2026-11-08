@@ -67,6 +67,20 @@ int video_init(int headless, char *err, int errsize)
     return 1;
 }
 
+#ifdef OMR_ESP32
+/* the board's race: three pictures in the menu screen's room (each 284x216 of its 640x480): one
+   sent to the LCD, one drawn by core 1, one built by core 0 (race.c) */
+uint16_t *video_race_buffer(int k)
+{
+    return g_pixels + 65536 * k;        /* (128 KB apart: on cache lines) */
+}
+
+void video_use(uint16_t *screen)
+{
+    g_screen = screen;
+}
+#endif
+
 void video_set_size(int w, int h, int view_h)
 {
     if (w == g_scr_w && h == g_surf_h && view_h == g_scr_h)
@@ -78,6 +92,7 @@ void video_set_size(int w, int h, int view_h)
     /* the board's race picture is its rows one after another, so the LCD's DMA can send it as
        it is; the menus keep the 640 pixels' pitch */
     g_pitch = w < SCREEN_MAX_W ? w : SCREEN_MAX_W;
+    g_screen = g_pixels;
 #endif
     memset(g_pixels, 0, sizeof g_pixels);
 }
