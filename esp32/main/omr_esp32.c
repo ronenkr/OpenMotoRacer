@@ -29,6 +29,7 @@
 #include "joy.h"
 #include "race.h"
 #include "dialog.h"
+#include "menu.h"
 #include "esp32.h"
 #include "r3d.h"
 
@@ -379,9 +380,16 @@ static void sample(void)
         if (bootnow)
             buttons |= 1u << PAD_A;
         if (t)
-            buttons |= 1u << (tx < LCD_W / 2 ? PAD_B : PAD_X);
+            buttons |= 1u << (g_playback ? PAD_A                /* (a demo: a touch ends it) */
+                                         : tx < LCD_W / 2 ? PAD_B : PAD_X);
         if (touch && !t)                /* a touch let go in a race: no click for the menus */
             push_mouse(SDL_MOUSEBUTTONUP, 0, 0);
+    } else if (!g_racing && (g_menu.page == 25 || g_menu.page == 14)) {
+        /* the logo (25) and the title (14): any touch or button goes on, as the keyboard's
+           Escape skips the logo and Return starts from the title */
+        SDL_Keycode go = g_menu.page == 25 ? SDLK_ESCAPE : SDLK_RETURN;
+        if ((touch && !t) || (bootnow && !boot))
+            push_key(go, 1), push_key(go, 0);
     } else {
         int gx = tx * 640 / PIC_W, gy = (ty - PIC_Y) * 480 / PIC_H;
         gy = gy < 0 ? 0 : gy > 479 ? 479 : gy;
