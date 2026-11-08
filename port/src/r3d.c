@@ -13,12 +13,19 @@
 #include <stdlib.h>
 #include <string.h>
 #ifdef R3D_TWO
+#ifdef OMR_ESP32
+#include "freertos/FreeRTOS.h"
+#include "freertos/task.h"
+#include "freertos/semphr.h"
+#else
 #include <linux/futex.h>
 #include <pthread.h>
 #include <sched.h>
 #include <sys/syscall.h>
 #include <unistd.h>
 #endif
+#endif
+#include "fastfloat.h"      /* (last: the ESP32's single precision) */
 
 #define W g_scr_w
 #define H g_scr_h
@@ -30,7 +37,11 @@
 #define BUCKETS 7999            /* 0x655d38: 4 units of depth each */
 #define ENTRIES 7499            /* 0x65f0e0 */
 #define FREE_MAX 256            /* free pieces a screen row can hold */
+#if defined(OMR_ESP32) && defined(R3D_TWO)
+#define SPANS 0x1400            /* (the board: two of them in the room of one; at 320x240) */
+#else
 #define SPANS 0x2800            /* see-through pieces put off till last (0x68b040) */
+#endif
 #define BATCHES 1000            /* their triangles (0x625790) */
 #define FACES_MAX 2000          /* 0x62e438: faces drawn a frame, the 2001st on dropped */
 #define HALF 0x7bef             /* 0x50270c: each channel without its low bit, halved */
@@ -550,7 +561,7 @@ void r3d_camera_pos(const float pos[3])
     memcpy(g_campos, pos, sizeof g_campos);
 }
 
-void r3d_rotation(float m[3][3], const float ang[3], double k)
+void r3d_rotation(float m[3][3], const float ang[3], omr_double k)
 {
     int i[3], j;
     double c[3], s[3];
@@ -1919,7 +1930,44 @@ static void draw_rows(Drawer *w)
     }
 }
 
-#ifdef R3D_TWO
+#if defined(R3D_TWO) && defined(OMR_ESP32)
+/* The ESP32's second core draws every other row (NOTES §4.26), woken by a semaphore each
+   picture; the same rows and pixels as the MiSTer's below. */
+static SemaphoreHandle_t g_go_sem, g_done_sem;
+
+static void second_core(void *arg)
+{
+    (void)arg;
+    for (;;) {
+        xSemaphoreTake(g_go_sem, portMAX_DELAY);
+        draw_rows(&g_draw[1]);
+        xSemaphoreGive(g_done_sem);
+    }
+}
+
+void r3d_two_cpus(int (*pin)(void))
+{
+    (void)pin;
+    if (g_two)
+        return;
+    g_go_sem = xSemaphoreCreateBinary();
+    g_done_sem = xSemaphoreCreateBinary();
+    /* above the music's reading and the input, below the sound's mixing */
+    if (g_go_sem && g_done_sem
+        && xTaskCreatePinnedToCore(second_core, "r3d2", 12288, NULL, 8, NULL, 1) == pdPASS)
+        g_two = 1;
+}
+
+static void draw_both(int rows)
+{
+    g_draw[0].mask = g_draw[1].mask = 2 * rows - 1;
+    g_draw[0].val = 0;
+    g_draw[1].val = rows;
+    xSemaphoreGive(g_go_sem);
+    draw_rows(&g_draw[0]);
+    xSemaphoreTake(g_done_sem, portMAX_DELAY);
+}
+#elif defined(R3D_TWO)
 /* The second CPU (hybrid/CLAUDE.md: the helpers' CPU, Main_MiSTer's, which gives way to our
    priority) draws every other row. It sleeps between pictures. */
 static uint32_t g_go, g_done;

@@ -7,6 +7,11 @@ void esp32_default_bindings(void);      /* accelerate, brake, the stick, gears, 
 unsigned long long esp32_us(void);      /* microseconds, for the speed readout */
 extern unsigned long long g_esp_step_us, g_esp_draw_us;   /* time in the steps, in the 3D */
 extern unsigned g_esp_steps, g_esp_dropped;
+/* the step's parts timed (the readout's "parts"): ESP_T(i) adds the time since the last mark */
+extern unsigned long long g_esp_t[10], g_esp_mark;
+#define ESP_T(i) do { unsigned long long t_ = esp32_us(); g_esp_t[i] += t_ - g_esp_mark; g_esp_mark = t_; } while (0)
+#else
+#define ESP_T(i) ((void)0)
 #endif
 
 #endif

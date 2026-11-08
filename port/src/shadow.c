@@ -10,6 +10,7 @@
 #include "race.h"
 #include <math.h>
 #include <string.h>
+#include "fastfloat.h"      /* (last: the ESP32's single precision) */
 
 /* 0x45bf70 with 0x422de0: the top view's left half (from the front) on points 0 1 2 5, its
    right half on 5 2 3 4; the rear of the bike is at u = 1 */

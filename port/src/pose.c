@@ -20,6 +20,7 @@
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
+#include "fastfloat.h"      /* (last: the ESP32's single precision) */
 
 #define PI 3.141592653589793
 #define TWO_PI 6.283185307179586

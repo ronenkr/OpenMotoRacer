@@ -9,6 +9,7 @@
 #include "rand.h"
 #include <math.h>
 #include <string.h>
+#include "fastfloat.h"      /* (last: the ESP32's single precision) */
 
 #define PIECES 128
 #define STRIPS 16

@@ -376,6 +376,7 @@ static void console_task(void *arg)
 
 unsigned long long g_esp_step_us, g_esp_draw_us;
 unsigned g_esp_steps, g_esp_dropped;
+unsigned long long g_esp_t[10], g_esp_mark;
 
 unsigned long long esp32_us(void)
 {
@@ -398,6 +399,11 @@ static void perf_task(void *arg)
                  (unsigned)heap_caps_get_minimum_free_size(MALLOC_CAP_SPIRAM));
         ESP_LOGI(TAG, "race: %u steps (%u dropped), steps %llu ms, 3D %llu ms /5s",
                  g_esp_steps, g_esp_dropped, g_esp_step_us / 1000, g_esp_draw_us / 1000);
+        ESP_LOGI(TAG, "parts ms: in %llu riders %llu collide %llu fx %llu laps %llu cam %llu signs %llu snd %llu bodies %llu",
+                 g_esp_t[0] / 1000, g_esp_t[1] / 1000, g_esp_t[2] / 1000, g_esp_t[3] / 1000,
+                 g_esp_t[4] / 1000, g_esp_t[5] / 1000, g_esp_t[6] / 1000, g_esp_t[7] / 1000,
+                 g_esp_t[8] / 1000);
+        memset(g_esp_t, 0, sizeof g_esp_t);
         g_esp_steps = g_esp_dropped = 0;
         g_esp_step_us = g_esp_draw_us = 0;
         g_present_us = g_wait_us = g_send_us = 0;
@@ -411,6 +417,7 @@ static void game_task(void *arg)
     int code;
     (void)arg;
     setenv("OMR_PERF", "1", 0);
+    setenv("OMR_R3D_TWO", "1", 0);      /* both cores draw (r3d.c) */
     if (g_env_magic == ENV_MAGIC) {     /* the console's test settings */
         char *save, *tok;
         g_env[sizeof g_env - 1] = 0;

@@ -12,6 +12,7 @@
 #include "video.h"
 #include <math.h>
 #include <string.h>
+#include "fastfloat.h"      /* (last: the ESP32's single precision) */
 
 #define ANGLE_K 2607.594587618272       /* 16384 / 2 pi: the cosine table's index */
 #define PI 3.141592653589793

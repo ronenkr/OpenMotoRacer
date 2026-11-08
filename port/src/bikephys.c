@@ -13,7 +13,16 @@
 #include <stdlib.h>
 #include <string.h>
 
+#ifdef OMR_FAST_PHYS
+/* the ESP32 (NOTES §4.26): the in-betweens in single precision, which its FPU does (doubles are
+   software there, 13 ms a step for the 24 bikes); with -fsingle-precision-constant and tgmath's
+   float functions. Not the original's x87 to the bit any more: the riding the same but for
+   roundings, so a PC's replay or ghost may part from it in time. */
+typedef float R;
+#include <tgmath.h>
+#else
 typedef double R;
+#endif
 
 BikeWorld g_bikeworld = { 1.6f, 0, 1, 16.0f, 0, 0, 1, 0, 0, 0, { 0 }, 0, 0, 0, 0, 0, 0, 0, 0 };
 #define W g_bikeworld

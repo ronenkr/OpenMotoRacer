@@ -21,3 +21,14 @@ target_compile_options(${COMPONENT_LIB} PRIVATE -fwrapv -ffp-contract=off -fsign
 target_compile_definitions(${COMPONENT_LIB} PRIVATE OMR_ESP32=1)
 set_source_files_properties(${PORT}/main.c PROPERTIES COMPILE_DEFINITIONS main=omr_main)
 set_source_files_properties(${PORT}/third_party/decoders.c PROPERTIES COMPILE_OPTIONS -w)
+# the bikes' physics in single precision (the FPU's; doubles are software here): NOTES §4.26
+set_source_files_properties(${PORT}/bikephys.c ${PORT}/cpu.c PROPERTIES
+                            COMPILE_OPTIONS -fsingle-precision-constant
+                            COMPILE_DEFINITIONS OMR_FAST_PHYS=1)
+# and what is seen and heard (port/src/fastfloat.h)
+foreach(f r3d bike3d pose race_sound camera effects shadow horizon)
+  set_source_files_properties(${PORT}/${f}.c PROPERTIES COMPILE_OPTIONS -fsingle-precision-constant
+                              COMPILE_DEFINITIONS OMR_FAST_FLOAT=1)
+endforeach()
+# both cores draw the race: every other row on core 1 (r3d.c, as the MiSTer's)
+set_source_files_properties(${PORT}/r3d.c PROPERTIES COMPILE_DEFINITIONS "OMR_FAST_FLOAT=1;R3D_TWO=1")

@@ -534,6 +534,9 @@ static void step(int ms)
 {
     g_race_steps++;
     BikePhys *all[RIDERS];
+#ifdef OMR_ESP32
+    g_esp_mark = esp32_us();
+#endif
     int k, attack = g_solo && g_mode == MODE_PRACTICE && g_time_attack;
     g_control = 1;              /* Game_Frame: the player's keys are read */
     if (!inputs(ms))
@@ -552,6 +555,7 @@ static void step(int ms)
                                    + g_bikeworld.frame_ms);
     g_bikeworld.countdown = g_counting;
     g_bikeworld.clock = g_step_at;
+    ESP_T(0);                           /* inputs, rules' time */
     for (k = 0; k < RIDERS; k++)
         all[k] = &g_phys[k];
     for (k = 1; k < g_riders; k++)      /* 0x47df40: dt = ms x 0.1; 0x45d540 */
@@ -574,17 +578,21 @@ static void step(int ms)
                      p->crash_v);
         p->crash_flag = 0;
     }
+    ESP_T(1);                           /* the riders' physics */
     bikephys_collide(all, g_riders, (float)(ms * 0.1));
+    ESP_T(2);
     rumble(&g_phys[g_player]);
     effects_step((float)(ms * 0.1));    /* 0x457590 */
     for (k = 1; k < g_riders; k++)
         to_rider(&g_rider[k], &g_phys[k]);
+    ESP_T(3);                           /* effects, to_rider */
     land_anim_step((float)(ms * 0.1));          /* 0x48b7a0 */
     rules_laps();
     for (k = 1; k < g_riders; k++)      /* 0x47e3d0 walks each bike's own +0x31c1 */
         g_phys[k].sec = g_rider[k].sec;
     rules_places();
     race_end(ms);
+    ESP_T(4);                           /* anims, laps, places, end */
     camera_onboard(g_onboard && !g_phys[g_follow].crashed);         /* 0x4583e0 */
     camera_step(&g_phys[g_follow], (float)(ms * 0.1), g_counting,
                 g_racer[g_follow].state == RS_FINISHED,
@@ -594,17 +602,20 @@ static void step(int ms)
             pose_step(&g_phys[k]);
         g_rider[k].pose = g_phys[k].pose, g_rider[k].hand = g_phys[k].detail, g_rider[k].lod = g_phys[k].lod;
     }
+    ESP_T(5);                           /* camera, poses */
     if (cockpit_shown())        /* 0x462110's shake, once a picture of the original */
         bike3d_cockpit_step(bikephys_frame_pitch(&g_phys[g_follow]));
     signs_step((float)(ms * 0.1), g_race_kind); /* 0x486310, 0x47b7a0: drawn once a step */
     figure_step((float)(ms * 0.1),
                 g_mode != MODE_PRACTICE && g_racer[g_follow].state == RS_FINISHED
                 ? g_racer[g_follow].place : -1, g_winner_sequence);
+    ESP_T(6);                           /* signs, figure */
     race_sound_step(all, g_follow, camera_eye(), camera_target(), (float)(ms * 0.1));
     if (g_race_kind == 0 && !g_race_over && !g_time_over && g_mode != MODE_PRACTICE
         && g_racer[race_local()].state == RS_RACING && race_local() == g_follow)
         race_sound_commentary(rules_place_of(race_local()), riders_loaded());
     race_log();
+    ESP_T(7);                           /* sound, commentary */
 }
 
 /* ------------------------------------------------------------------ the demos */
@@ -1342,10 +1353,14 @@ void race_frame(void)
             return;
         /* what the drawer leaves for a crash (+0x3085, +0x30b5), from the step's state,
            so the pictures in between never reach the game */
+#ifdef OMR_ESP32
+        g_esp_mark = esp32_us();
+#endif
         for (k = 1; k < g_riders; k++) {
             bike3d_body(&g_rider[k]);
             from_rider(&g_phys[k], &g_rider[k]);
         }
+        ESP_T(8);                       /* the bodies */
     }
     prof_mark(MARK_STEPS);
 #ifdef OMR_ESP32

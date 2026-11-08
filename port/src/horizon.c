@@ -11,6 +11,7 @@
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
+#include "fastfloat.h"      /* (last: the ESP32's single precision) */
 
 #define K 2607.594587618272     /* 0x4d00d0: 16384 / 2pi */
 #define PI100 314.1592653589793 /* 0x4d00d8 */

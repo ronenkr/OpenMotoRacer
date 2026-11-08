@@ -25,6 +25,7 @@
 #include <string.h>
 #include <stdio.h>
 #include <stdlib.h>
+#include "fastfloat.h"      /* (last: the ESP32's single precision) */
 
 #define RAND() rand_next(4)     /* 0x4b1160(4) */
 

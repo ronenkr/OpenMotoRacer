@@ -13,6 +13,7 @@
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
+#include "fastfloat.h"      /* (last: the ESP32's single precision) */
 
 #define TO_INDEX 2607.594587618272      /* 0x4d0300: 16384 / 2pi */
 #define BONES 20                        /* records a skeleton has (n <= 18, then the extra) */
@@ -772,7 +773,7 @@ static void rider(Rider *rd, int lod, int draw)
 
 /* ---------------------------------------------------------------- the on-board view */
 
-void bike3d_cockpit_step(double pitch)
+void bike3d_cockpit_step(omr_double pitch)
 {
     g_shake = f32((pitch * -0.25f - g_shake) * 0.25f + g_shake);
 }
