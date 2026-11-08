@@ -69,6 +69,11 @@ void video_set_size(int w, int h, int view_h)
     g_scr_w = w;
     g_scr_h = view_h;
     g_surf_h = h;
+#ifdef OMR_ESP32
+    /* the board's race picture is its rows one after another, so the LCD's DMA can send it as
+       it is; the menus keep the 640 pixels' pitch */
+    g_pitch = w < SCREEN_MAX_W ? w : SCREEN_MAX_W;
+#endif
     memset(g_pixels, 0, sizeof g_pixels);
 }
 

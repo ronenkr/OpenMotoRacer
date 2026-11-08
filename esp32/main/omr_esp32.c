@@ -14,6 +14,7 @@
 #include <string.h>
 #include "freertos/FreeRTOS.h"
 #include "freertos/task.h"
+#include "freertos/semphr.h"
 #include "esp_heap_caps.h"
 #include "esp_timer.h"
 #include "esp_log.h"
@@ -33,6 +34,7 @@
 static const char *TAG = "omr";
 
 int omr_main(int argc, char **argv);    /* port/src/main.c's main */
+void sound_report(void);                /* sound.c: what is playing */
 
 /* ------------------------------------------------------------------ the picture */
 #define PIC_W LCD_W                     /* 284 */
@@ -83,16 +85,9 @@ static void shot(const uint16_t *src, int w, int h, int pitch)
     usb_serial_jtag_wait_tx_done(pdMS_TO_TICKS(1000));
 }
 
-void esp32_present(const void *pixels, int w, int h, int pitch)
+/* the scaling, on core 1 (present_task) */
+static void scale(const uint16_t *src, int w, int h, int pitch)
 {
-    if (g_shot_wanted) {
-        g_shot_wanted = 0;
-        g_shot_busy = 1;                /* (no readout in the middle of it) */
-        vTaskDelay(pdMS_TO_TICKS(20));
-        shot(pixels, w, h, pitch);
-        g_shot_busy = 0;
-    }
-    const uint16_t *src = pixels;
     uint16_t *out;
     int64_t t0 = esp_timer_get_time();
     int x, y;
@@ -135,6 +130,48 @@ void esp32_present(const void *pixels, int w, int h, int pitch)
     }
     g_cur ^= 1;
     g_present_us += esp_timer_get_time() - t0;
+}
+
+static SemaphoreHandle_t g_scale_go, g_scale_done;
+static volatile int g_scaling;          /* a picture handed over, not yet scaled */
+static const uint16_t *g_sc_src;
+static int g_sc_w, g_sc_h, g_sc_pitch;
+
+static void present_task(void *arg)
+{
+    (void)arg;
+    for (;;) {
+        xSemaphoreTake(g_scale_go, portMAX_DELAY);
+        scale(g_sc_src, g_sc_w, g_sc_h, g_sc_pitch);
+        xSemaphoreGive(g_scale_done);
+    }
+}
+
+void esp32_present_wait(void)
+{
+    if (g_scaling) {
+        xSemaphoreTake(g_scale_done, portMAX_DELAY);
+        g_scaling = 0;
+    }
+}
+
+void esp32_present(const void *pixels, int w, int h, int pitch)
+{
+    esp32_present_wait();
+    if (g_shot_wanted) {
+        g_shot_wanted = 0;
+        g_shot_busy = 1;                /* (no readout in the middle of it) */
+        vTaskDelay(pdMS_TO_TICKS(20));
+        shot(pixels, w, h, pitch);
+        g_shot_busy = 0;
+    }
+    if (!g_scale_go) {                  /* (not started yet: here) */
+        scale(pixels, w, h, pitch);
+        return;
+    }
+    g_sc_src = pixels, g_sc_w = w, g_sc_h = h, g_sc_pitch = pitch;
+    g_scaling = 1;
+    xSemaphoreGive(g_scale_go);
 }
 
 void esp32_message(const char *title, const char *msg)
@@ -319,6 +356,8 @@ int esp32_event(SDL_Event *e)
 {
     static int fresh = 1;
     if (fresh) {
+        if (!g_racing)
+            esp32_present_wait();       /* (a menu draws at once; a race after its steps) */
         sample();
         fresh = 0;
     }
@@ -343,6 +382,31 @@ static void console_task(void *arg)
         switch (c) {
         case 'S': g_shot_wanted = 1; break;
         case 'I': g_show_accel ^= 1; break;
+        case 'W': {                     /* 3 s of the sound as sent to the codec, base64 */
+            extern int16_t *g_cap;
+            extern volatile int g_cap_n, g_cap_want;
+            static unsigned char out[700];
+            int at;
+            if (!g_cap)
+                g_cap = heap_caps_malloc(22050 * 3 * 2, MALLOC_CAP_SPIRAM);
+            if (!g_cap)
+                break;
+            g_cap_n = 0;
+            g_cap_want = 22050 * 3;
+            while (g_cap_n < g_cap_want)
+                vTaskDelay(pdMS_TO_TICKS(50));
+            g_shot_busy = 1;
+            usb_serial_jtag_write_bytes("\nWAV 22050\n", 11, portMAX_DELAY);
+            for (at = 0; at < g_cap_want; at += 256) {
+                size_t olen = 0;
+                mbedtls_base64_encode(out, sizeof out - 1, &olen, (const unsigned char *)(g_cap + at), 512);
+                out[olen++] = '\n';
+                usb_serial_jtag_write_bytes(out, olen, portMAX_DELAY);
+            }
+            usb_serial_jtag_write_bytes("END\n", 4, portMAX_DELAY);
+            g_shot_busy = 0;
+            break;
+        }
         case 'X': {                     /* X settings... \n: restart with them (X\n: none) */
             char line[sizeof g_env];
             int k = 0;
@@ -414,6 +478,7 @@ static void perf_task(void *arg)
                  g_esp_t[4] / 1000, g_esp_t[5] / 1000, g_esp_t[6] / 1000, g_esp_t[7] / 1000,
                  g_esp_t[8] / 1000);
         memset(g_esp_t, 0, sizeof g_esp_t);
+        sound_report();
         {
             float g[3] = { 0, 0, 0 };
             board_accel(g);
@@ -477,6 +542,9 @@ void app_main(void)
         ESP_LOGE(TAG, "no SD card: put the card with MOTO/ on it in, then press reset");
         return;
     }
+    g_scale_go = xSemaphoreCreateBinary();
+    g_scale_done = xSemaphoreCreateBinary();
+    xTaskCreatePinnedToCore(present_task, "present", 4096, NULL, 7, NULL, 1);
     xTaskCreatePinnedToCore(input_task, "input", 4096, NULL, 6, NULL, 1);
     xTaskCreatePinnedToCore(perf_task, "perf", 4096, NULL, 1, NULL, 1);
     xTaskCreatePinnedToCore(console_task, "console", 3072, NULL, 2, NULL, 1);

@@ -115,11 +115,15 @@ static void screen_set(void)
     video_set_half(g_mister_res == MR_640x240);
 #endif
 #ifdef OMR_ESP32
-    m = g_race_screen = 0;      /* the board's LCD: 320x240 only (284x216 shown) */
+    m = g_race_screen = 0;      /* the board's LCD: the low mode, at the LCD picture's own size */
 #endif
     g_new_screen = 0;
     g_screen_mode = m;
+#ifdef OMR_ESP32
+    video_set_size(284, 216, 216);  /* (no scaling: sent to the LCD as drawn, NOTES §4.26) */
+#else
     video_set_size(w[m], h[m], g_mode169 ? w[m] / 16 * 9 : h[m]);
+#endif
     r3d_screen();
     text_clear();
     hud_screen();
@@ -1301,6 +1305,10 @@ void race_frame(void)
     float eye[3], c[3][3], a, focal;
     static const float zero[3];
     int i, k, sec, flags;
+#ifdef OMR_ESP32
+    if (g_paused || g_new_screen || g_events)   /* (these draw before the steps) */
+        esp32_present_wait();
+#endif
     if (g_paused) {             /* the last picture stays; no time passes */
         g_step_at += g_now - g_last_now;
         g_last_now = g_now;
@@ -1365,6 +1373,7 @@ void race_frame(void)
     prof_mark(MARK_STEPS);
 #ifdef OMR_ESP32
     g_esp_step_us += esp32_us() - t_steps;
+    esp32_present_wait();       /* (the last picture scaled on core 1 meanwhile) */
 #endif
     a = g_smooth ? (float)(g_now - g_step_at) / STEP_MS : 1.0f;
     for (k = 1; k < g_riders; k++)

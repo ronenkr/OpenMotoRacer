@@ -7,3 +7,22 @@ entries:
     board (default)
     omr_esp32 (default)
     sdl_esp32 (default)
+
+# the 3D's painters in internal RAM: no waiting on the flash's 32 KB cache behind the game's code
+[mapping:omr_iram]
+archive: libmain.a
+entries:
+    r3d:draw_rows (noflash)
+    r3d:span (noflash)
+    r3d:span6 (noflash)
+    r3d:triangle (noflash)
+    r3d:tri6 (noflash)
+    r3d:row (noflash)
+    r3d:row6 (noflash)
+    r3d:rows6 (noflash)
+    r3d:flat_face (noflash)
+    r3d:flat_row (noflash)
+    r3d:faces (noflash)
+    r3d:r3d_points (noflash)
+    r3d:clip (noflash)
+    r3d:remap (noflash)

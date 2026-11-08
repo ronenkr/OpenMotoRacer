@@ -24,6 +24,30 @@ if "--keys" in sys.argv:
 if "--env" in sys.argv:                         # --env "OMR_PAGE=1 ...": restart with them
     s.write(b"X" + sys.argv[sys.argv.index("--env") + 1].encode() + b"\n"); s.flush(); time.sleep(0.5)
     sys.exit(0)
+if "--wav" in sys.argv:                         # --wav OUT.wav: 3 s of the board's sound
+    import wave
+    out = sys.argv[sys.argv.index("--wav") + 1]
+    s.reset_input_buffer(); s.write(b"W"); s.flush()
+    data, on, end, buf = b"", False, time.time() + 20, b""
+    while time.time() < end:
+        buf += s.read(65536)
+        while b"\n" in buf:
+            line, buf = buf.split(b"\n", 1)
+            line = line.strip()
+            if line.startswith(b"WAV "):
+                on = True
+            elif line == b"END" and on:
+                end = 0
+                break
+            elif on:
+                try:
+                    data += base64.b64decode(line, validate=True)
+                except Exception:
+                    pass
+    w = wave.open(out, "wb"); w.setnchannels(1); w.setsampwidth(2); w.setframerate(22050)
+    w.writeframes(data); w.close()
+    print(out, len(data) // 2, "samples")
+    sys.exit(0)
 if "--click" in sys.argv:                       # --click X,Y (game pixels, 640x480)
     x, y = map(int, sys.argv[sys.argv.index("--click") + 1].split(","))
     s.write(b"c%03d%03d" % (x, y)); s.flush(); time.sleep(0.3)

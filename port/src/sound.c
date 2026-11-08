@@ -147,6 +147,25 @@ static void mus_unlock(void)
         SDL_UnlockMutex(g_mus_lock);
 }
 
+#ifdef OMR_ESP32
+/* the board's readout: what is playing (loops: the engines, skids) */
+void sound_report(void)
+{
+    int k, n = 0, loops = 0;
+    for (k = 0; k < g_top; k++)
+        if (g_slot[k].s && g_slot[k].playing && !g_slot[k].paused) {
+            n++;
+            if (g_slot[k].loop) {
+                if (loops++ < 6)
+                    printf("  loop %d: %u samples at %d Hz, vol %d pan %d, gains %.3f %.3f\n", k,
+                           g_slot[k].s->n, g_slot[k].freq, g_slot[k].vol, g_slot[k].pan,
+                           (double)g_slot[k].gl, (double)g_slot[k].gr);
+            }
+        }
+    printf("sound: %d playing, %d loops, volumes %d %d %d\n", n, loops, g_volume[0], g_volume[1], g_volume[2]);
+}
+#endif
+
 /* ------------------------------------------------------------------ the mixer */
 
 /* one voice into the frames' sums */

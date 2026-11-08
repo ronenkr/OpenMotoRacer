@@ -5,6 +5,7 @@
 #include "omr_esp32.h"
 #include "board.h"
 
+#include <math.h>
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
@@ -193,6 +194,10 @@ static SDL_AudioCallback g_cb;
 static void *g_cb_user;
 static volatile int g_paused = 1;
 
+/* the console's W: 3 s of what goes to the codec, kept for sending (tools/esp32_shot.py --wav) */
+int16_t *g_cap;
+volatile int g_cap_n, g_cap_want;
+
 static void audio_fill(int16_t *out, int frames)
 {
     static int16_t st[2 * 512];
@@ -202,8 +207,29 @@ static void audio_fill(int16_t *out, int frames)
         return;
     }
     g_cb(g_cb_user, (Uint8 *)st, frames * 4);
-    for (i = 0; i < frames; i++)                /* the board has one speaker */
-        out[i] = (int16_t)((st[2 * i] + st[2 * i + 1]) >> 1);
+    /* the board has one small speaker: mono; then what it cannot play taken away (a 200 Hz
+       high-pass: 96% of a race's sound was below it, engines and the music's bass, measured
+       2026-11-09), and the rest made louder in the room that leaves (x 1.6, clipped) */
+    {
+        static float x1, x2, y1, y2;
+        static float b0, b1, b2, a1, a2;
+        if (b0 == 0.0f) {
+            float w0 = 2.0f * 3.14159265f * 200.0f / 22050.0f, c = cosf(w0), al = sinf(w0) / (2.0f * 0.7071f);
+            float n = 1.0f / (1.0f + al);
+            b0 = (1.0f + c) * 0.5f * n, b1 = -(1.0f + c) * n, b2 = b0;
+            a1 = -2.0f * c * n, a2 = (1.0f - al) * n;
+        }
+        for (i = 0; i < frames; i++) {
+            float x = (float)(st[2 * i] + st[2 * i + 1]) * 0.5f;
+            float y = b0 * x + b1 * x1 + b2 * x2 - a1 * y1 - a2 * y2;
+            x2 = x1, x1 = x, y2 = y1, y1 = y;
+            y *= 1.6f;
+            out[i] = (int16_t)(y > 32767.0f ? 32767 : y < -32768.0f ? -32768 : (int)y);
+        }
+    }
+    if (g_cap && g_cap_n < g_cap_want)
+        for (i = 0; i < frames && g_cap_n < g_cap_want; i++)
+            g_cap[g_cap_n++] = out[i];
 }
 
 SDL_AudioDeviceID SDL_OpenAudioDevice(const char *dev, int capture, const SDL_AudioSpec *want,
