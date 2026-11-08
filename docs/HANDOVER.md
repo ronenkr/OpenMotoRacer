@@ -208,3 +208,9 @@ original has analog steering and throttle only on one stick under JOYSTICK, a br
 
 ## 2026-11-02: 640x240 a steady 60
 Both CPUs draw the race, every other row each (`R3D_TWO`, `r3d.c`; the same pixels), and the sound no longer waits on anything: the mixer `SCHED_FIFO`, the race's sound files read outside its lock. On the real core all ten tracks hold 59.6 at 640x240, 1 picture never shown and 1 shown twice of 21000 after the race's load; `DRAW_AHEAD` measured again, stays 1. NOTES §4.25. `hybrid/` went to its main in the same step, which `package.sh` needed for the covers. The build is in the MiSTer's *Test* menu; not released, not published. Danik's to judge: the feel of a real race with a pad, and the OSD and input while both CPUs draw (only autopilot was measured).
+
+## 2026-11-09: the ESP32-S3 (branch `esp32`)
+The game runs on the Waveshare ESP32-S3-Touch-LCD-1.83: menus, races at ~25 pictures a second, music
+and sounds, tilt steering, touch and buttons (NOTES §4.26). The user tried it: steering, picture and
+engine sound fine after their fixes. Open: more speed (core 1's drawing is the limit: detail,
+interlacing were offered), the ULP (optional, not started), the split screen still last.

@@ -11773,6 +11773,80 @@ Checked after all of it: `tools/shots.sh` 91 of 91, `tools/arm.sh check` 91 pict
 
 So `DRAW_AHEAD` 1: a clear gain at 320x240, nothing lost at 640x240. Not in an interlaced race (the framework's rule). (Those two tables' runs are from before the speed work above.)
 
+### 4.26 The ESP32-S3 (2026-11-08/09, branch `esp32`, the project `esp32/`)
+
+The board: **Waveshare ESP32-S3-Touch-LCD-1.83** (ESP32-S3R8: 2 LX7 cores at 240 MHz, 8 MB octal
+PSRAM at 80 MHz, 16 MB flash). From Waveshare's schematic and BSP 2.0.0, all checked on the board:
+ST7789P 240x284 on SPI2 (MOSI 7, SCLK 6, CS 5, DC 4, RST 38, backlight 40), run at **80 MHz** (66
+full frames a second measured); I2C 14/15 at 400 kHz with the CST816D touch (0x15, INT 13, RST 39),
+QMI8658 (0x6b), ES8311 (0x18), AXP2101 (0x34); I2S MCLK 16, BCLK 9, WS 45, DOUT 8, amplifier 46;
+SD in SDMMC **1 bit** (CLK 2, CMD 1, D0 3, D3 42 held high), 40 MHz; BOOT on GPIO0 (low pressed),
+PWR through the AXP2101 seen on **GPIO41, high while pressed** (measured). The AXP2101's register
+0x27 already had the 10 s power-off press (0x1c). The first start after flashing sometimes finds
+the card not ready: mounted with retries.
+
+**Tilt**: the accelerometer's **X** is along the LCD's long side (held sideways, USB on top: left
+end down -0.6 g, right +0.7 g, Y unmoved, measured 2026-11-09); steering = X minus X at the race's
+start, full lock at 0.45 g, a 0.03 g dead zone, to `joy_fake_pad`'s stick (as the MiSTer's pad).
+
+**The build** (`esp32/main/CMakeLists.txt`): `port/src/*.c` as they are (not `mister.c`, `prof.c`)
+with `OMR_ESP32`, an SDL subset on FreeRTOS (`esp32/main/sdl/SDL.h`, `sdl_esp32.c`: threads,
+locks, `esp_timer`, the sound device, the picture handed to `esp32_present`, events from the
+board), `board.c`, `omr_esp32.c`. `main.c`'s `main` is `omr_main`. The game's static arrays go to
+PSRAM by a linker fragment (`linker.lf`: `* (extram_bss)`), the 3D's painters to IRAM.
+`SPIRAM_MALLOC_ALWAYSINTERNAL` 512: at 16384 the game's small allocations filled the internal RAM
+and file opens failed.
+
+**Fitting 8 MB** (each step checked on the PC: 91 pictures and 3 race logs unchanged unless said):
+- Banks keep only their table; a file is read out of the bank when asked for (all builds). The
+  track (1.3 MB) is read through a 32 KB window (`dsi_fopen`, all builds).
+- The program image keeps only what its file holds, without the code and relocations, which
+  nothing reads (all builds: 0.3 MB in place of 3.1).
+- Menu pictures (244, 20 MB as 16-bit): only their sizes at the start, their pixels when drawn,
+  kept 8-bit with their palette, the least lately drawn given up past 1.5 MB, all at a race's
+  load (`bitmap.c`); other pictures 8-bit too. `bitmap_loaded()` where pages tested `pix`.
+- Fonts read when first used; the ghost's 1 MB only in a time attack; one horizon (320 mode).
+- Textures (`r3d.c`, `Tex`): a bike's liveries are its 8-bit page through its palettes (no
+  128 KB copy each); a track's pages are made 8-bit with 256 colours each (exact up to 256,
+  else a median cut, colour 0 kept exactly 0). Next to the PC's, practically the same.
+- A face keeps its corners once (floats; the affine u = `ftolf(u x 8192.0f)`, the same integer),
+  its narrow fields narrow (all builds; 104 to 52 bytes).
+- Sounds: the game's own **8-bit set** (`data\sfx\8_Bits`, its option for slow PCs), kept
+  8-bit; the mixer at 22050 Hz, music `music/trackNN.wav` 22 kHz mono from `tools/esp32_card.py`.
+A race then holds 4.5-5.2 MB of the ~5.3 MB of PSRAM heap.
+
+**Speed** (Speed Bay, 24 riders, autopilot), in order:
+| Step | Pictures a second |
+|---|---|
+| first race, doubles in software, one core | 5.7 |
+| **physics in single precision** (`OMR_FAST_PHYS`: `R` a float, tgmath, `-fsingle-precision-constant`) | 7.5 |
+| what is seen and heard in single precision (`fastfloat.h`) | 9 |
+| both cores draw, every other row (`R3D_TWO` on FreeRTOS) | 16.5 |
+| the race drawn at 284x216, the LCD's size; sent by DMA from the game's screen (the ST7789 little-endian: RAMCTRL 0xb0, 0xf8) | 22.5 |
+| **the pipeline** (`R3D_PIPE`): core 1 draws a picture from a copy of the lists while core 0 steps and builds the next on another of three pictures | 24.8 |
+The physics in single precision is **not the original's x87 to the bit** any more on the board (the
+user's choice, 2026-11-09): a PC's replay or ghost may part from it. The PC is unchanged. A race
+steps at most 4 times a picture there (it was falling behind for ever at 6 a second).
+The pipeline shows a picture behind the game (~35 ms); a picture's HUD is the newer state.
+Tried, no better, left out: the rows in two bands with the line moving to the busier core (Jet's;
+the road's triangles cross both), `-O3`, scaling on core 1 (it competed for PSRAM). 120 MHz PSRAM
+needs the flash at 120 MHz.
+Now: core 1 draws ~33 ms a picture (the limit), core 0 steps ~17 ms and builds ~14 ms a picture.
+
+**Sound**: 96% of a race's sound was below 200 Hz, which the small speaker cannot play (the engines
+seemed silent at low revs): a 200 Hz high-pass and x1.6 before the codec, no clipping (measured
+from the board's own output, the console's `W`).
+
+**Touch**: menu buttons and the race's dialog rows take the nearest within 90 of 640 pixels
+(`menu_hit`, `row_at`); the press is where the finger lifts. A tap skips the logo and starts from
+the title, and ends a demo.
+
+**Tools**: `tools/esp32_card.py` (the card from the CD's .cue/.bin), `tools/esp32_log.py` (the
+log), `tools/esp32_shot.py` (the console: `S` a picture, `n e u d l r 1..9` keys, `a b t` held
+controls, `cXXXYYY` a touch, `X settings` a restart with test settings such as `OMR_PAGE=1
+OMR_CHOICES=1,0,4,0,0 OMR_AUTOPILOT=1`, `W` 3 s of sound, `I` the accelerometer). The readout every
+5 s: pictures, step parts, 3D, memory, the input, what is playing.
+
 ## 5. Running the original (for checking)
 `tools/orig.sh start|shot|key|stop`, unseen, nobody's screen needed (2026-10-26):
 - A private copy in `build/orig` (with GOG's dgVoodoo `DDraw.dll`, `D3DImm.dll` and

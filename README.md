@@ -47,6 +47,38 @@ the game on the MiSTer's ARM, a small FPGA core for the 15 kHz picture, the soun
 controllers. Install and play instructions are there. The MiSTer's code here is the branch
 `mister`, behind the `MISTER_HYBRID` build option.
 
+## On the ESP32 (Waveshare ESP32-S3-Touch-LCD-1.83)
+
+The branch `esp32` runs the game on the [Waveshare ESP32-S3-Touch-LCD-1.83](https://www.waveshare.com/wiki/ESP32-S3-Touch-LCD-1.83)
+(ESP32-S3, 8 MB PSRAM, 240x284 touch LCD, ES8311 speaker), held sideways with the USB connector on
+top: a race at about 25 pictures a second, with its music and sounds. It plays the 1997 CD's data.
+
+**Controls.** Tilt the board to steer (the way it is held when a race starts is straight). BOOT
+accelerates, the touch screen's left half brakes and its right half is turbo, PWR pauses. In the
+menus a tap is the mouse (the nearest button takes it, pressed when the finger lifts), BOOT is
+Return and PWR is Back; a tap skips the logo and starts from the title.
+
+**The SD card** (FAT32), made from your CD's image (`.cue` with its `.bin` files) with Python 3,
+numpy and 7-Zip:
+
+```sh
+python3 tools/esp32_card.py "path/to/Moto Racer (USA).cue" build/sdcard
+cp -r build/sdcard/MOTO build/sdcard/OMR /media/<your card>/
+```
+
+`MOTO/` holds the game's `DATA/`, `MOTO.EXE` and the music as `music/trackNN.wav` (22 kHz mono);
+`OMR/` is where settings and saves go.
+
+**Building and flashing** with [ESP-IDF](https://docs.espressif.com/projects/esp-idf/) v6.0:
+
+```sh
+. ~/esp/v6.0/esp-idf/export.sh
+idf.py -C esp32 build
+idf.py -C esp32 -p /dev/ttyACM0 flash
+```
+
+How it was fitted into 8 MB and made fast is in `docs/NOTES.md` §4.26.
+
 ## Building
 
 C11, CMake and SDL2:

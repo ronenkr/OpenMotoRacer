@@ -163,6 +163,7 @@ C11, CMake, SDL2 linked dynamically. Built with one command:
 - Test switches: `OMR_PAGE`, `OMR_LIST` (the track list), `OMR_CHOICES="MODE,TRACK,LAPS[,REV,POC]"`, `OMR_TILE=SX,SY` (the chequered tile's scroll, to match a capture;
   `tools/cmpshot.py` finds it), `OMR_INPUT="F:key F:hold:key F:release:key F:move:X,Y F:click F:down F:up"` (input at frame F),
   `OMR_TEXT="FONT,X,Y,ALIGN,EFFECT,BLINK,FORE,BACK,TEXT"` (one text object).
+- The ESP32-S3 (branch `esp32`, NOTES §4.26): `esp32/` (ESP-IDF v6) for the Waveshare ESP32-S3-Touch-LCD-1.83, an SDL subset on FreeRTOS, `OMR_ESP32`; tilt, touch, BOOT, PWR; ~25 a second (single-precision physics: not bit-exact there), `tools/esp32_card.py`, `tools/esp32_shot.py`.
 - Progress tracker for Danik: https://claude.ai/artifact/CCupuhZmsCRgz7FA5eFMxz
 
 ## File formats
