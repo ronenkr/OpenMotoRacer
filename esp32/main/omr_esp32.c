@@ -156,10 +156,12 @@ void esp32_message(const char *title, const char *msg)
 static volatile int g_touch_down, g_touch_x, g_touch_y;
 static volatile int g_boot, g_pwr;
 static volatile float g_tilt;           /* the lateral gravity, in g, smoothed */
+static volatile int g_show_accel;       /* the console's I: the accelerometer 4 times a second */
 
-/* the accelerometer's axis along the LCD's long side, held sideways, and its sign: tilting
-   the board's right side down steers right (measured on the board, NOTES §4.26) */
-#define TILT_AXIS 1
+/* the accelerometer's axis along the LCD's long side (X), held sideways with the USB connector
+   on top, and its sign: the left end down reads below 0 and steers left (measured on the board,
+   2026-11-09: left -0.6 g, right +0.7 g, Y unmoved). The same axis held flat or upright. */
+#define TILT_AXIS 0
 #define TILT_SIGN (+1.0f)
 #define TILT_FULL 0.45f                 /* g at full lock: about 27 degrees */
 #define TILT_DEAD 0.03f
@@ -182,6 +184,11 @@ static void input_task(void *arg)
             f = first ? v : f + (v - f) * 0.35f;  /* (a few ms of smoothing at 200 Hz) */
             first = 0;
             g_tilt = f;
+            {
+                static int n;
+                if (g_show_accel && ++n % 50 == 0)
+                    printf("ACCEL %+.2f %+.2f %+.2f\n", g[0], g[1], g[2]);
+            }
         }
         vTaskDelay(pdMS_TO_TICKS(5));
     }
@@ -201,6 +208,7 @@ static volatile int g_click_x = -1, g_click_y;   /* a click typed on the console
 static RTC_NOINIT_ATTR uint32_t g_env_magic;
 static RTC_NOINIT_ATTR char g_env[256];
 static int g_was_driving = -1;
+static volatile int g_sent_x = 0x8000;  /* the stick last given to the game (readout) */
 
 static void push_key(SDL_Keycode k, int down)
 {
@@ -303,6 +311,7 @@ static void sample(void)
     if (g_pwr != pwr)
         push_key(SDLK_ESCAPE, g_pwr);
     pwr = g_pwr;
+    g_sent_x = x;
     joy_fake_pad(x, 0x8000, buttons, 0, 0, 0);
 }
 
@@ -333,6 +342,7 @@ static void console_task(void *arg)
             continue;
         switch (c) {
         case 'S': g_shot_wanted = 1; break;
+        case 'I': g_show_accel ^= 1; break;
         case 'X': {                     /* X settings... \n: restart with them (X\n: none) */
             char line[sizeof g_env];
             int k = 0;
@@ -404,6 +414,14 @@ static void perf_task(void *arg)
                  g_esp_t[4] / 1000, g_esp_t[5] / 1000, g_esp_t[6] / 1000, g_esp_t[7] / 1000,
                  g_esp_t[8] / 1000);
         memset(g_esp_t, 0, sizeof g_esp_t);
+        {
+            float g[3] = { 0, 0, 0 };
+            board_accel(g);
+            ESP_LOGI(TAG, "input: accel %+.2f %+.2f %+.2f tilt %+.2f zero %+.2f stick %04x device %d analog %d "
+                     "bind %d %d %d %d %d %d %d racing %d", g[0], g[1], g[2], g_tilt, g_tilt_zero, g_sent_x,
+                     g_input_device, g_analog, g_binding[0][1], g_binding[1][1], g_binding[2][1],
+                     g_binding[3][1], g_binding[4][1], g_binding[5][1], g_binding[6][1], g_racing);
+        }
         g_esp_steps = g_esp_dropped = 0;
         g_esp_step_us = g_esp_draw_us = 0;
         g_present_us = g_wait_us = g_send_us = 0;
@@ -460,7 +478,7 @@ void app_main(void)
         return;
     }
     xTaskCreatePinnedToCore(input_task, "input", 4096, NULL, 6, NULL, 1);
-    xTaskCreatePinnedToCore(perf_task, "perf", 3072, NULL, 1, NULL, 1);
+    xTaskCreatePinnedToCore(perf_task, "perf", 4096, NULL, 1, NULL, 1);
     xTaskCreatePinnedToCore(console_task, "console", 3072, NULL, 2, NULL, 1);
     /* the game: a big stack (the menus and the race go deep), internal RAM */
     xTaskCreatePinnedToCore(game_task, "game", 48 * 1024, NULL, 4, NULL, 0);
