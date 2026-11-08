@@ -385,14 +385,22 @@ static void sample(void)
     } else {
         int gx = tx * 640 / PIC_W, gy = (ty - PIC_Y) * 480 / PIC_H;
         gy = gy < 0 ? 0 : gy > 479 ? 479 : gy;
-        /* the pointer goes there first, the button goes down the picture after (a page sees
-           what is under the pointer before the press), and up when the finger lifts */
-        if (t)
+        /* the small screen: while the finger is down the pointer follows it and the button
+           under it (or the nearest, menu.c) lights; the press is where it lifts: down then,
+           up the picture after. So a finger can slide onto the right one before letting go. */
+        static int lx, ly, up_next;
+        if (up_next) {
+            push_mouse(SDL_MOUSEBUTTONUP, lx, ly);
+            up_next = 0;
+        }
+        if (t) {
             push_mouse(SDL_MOUSEMOTION, gx, gy);
-        if (t && touch == 1)
-            push_mouse(SDL_MOUSEBUTTONDOWN, gx, gy);
-        if (!t && touch == 2)
-            push_mouse(SDL_MOUSEBUTTONUP, gx, gy);
+            lx = gx, ly = gy;
+        } else if (touch) {
+            push_mouse(SDL_MOUSEMOTION, lx, ly);
+            push_mouse(SDL_MOUSEBUTTONDOWN, lx, ly);
+            up_next = 1;
+        }
         if (bootnow != boot)
             push_key(SDLK_RETURN, bootnow);
     }

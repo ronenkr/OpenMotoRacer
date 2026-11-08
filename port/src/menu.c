@@ -397,9 +397,21 @@ void menu_add_text_button(int x, int y, const char *text, int font, unsigned nb,
     b->flags = flags;
 }
 
+#ifdef OMR_ESP32
+/* the square of a point's distance from a box (0 inside) */
+static int box_d2(int x, int y, int x0, int y0, int x1, int y1)
+{
+    int dx = x < x0 ? x0 - x : x > x1 ? x - x1 : 0, dy = y < y0 ? y0 - y : y > y1 ? y - y1 : 0;
+    return dx * dx + dy * dy;
+}
+#endif
+
 int menu_hit(void)
 {
     int i;
+#ifdef OMR_ESP32
+    int best = -1, bd = 0;
+#endif
     if (!g_menu.mouse_mode)
         return g_menu.sel;
     for (i = 0; i < g_menu.nbuttons; i++) {
@@ -415,7 +427,29 @@ int menu_hit(void)
                  && g_my <= b->rect[3])
             return i;
     }
+#ifdef OMR_ESP32
+    /* the board's small screen (NOTES §4.26): a touch near no button's picture takes the
+       nearest button within 90 of the 640 pixels (40 on the LCD): each button's place grows
+       to meet its neighbours', none overlapping */
+    for (i = 0; i < g_menu.nbuttons; i++) {
+        Button *b = &g_menu.b[i];
+        int d;
+        if (b->kind == 2) {
+            Bitmap *p = b->pic;
+            if (!p)
+                continue;
+            d = box_d2(g_mx, g_my, p->x, p->y, p->x + p->w, p->y + p->h);
+        } else if (b->kind == 1)
+            d = box_d2(g_mx, g_my, b->rect[0], b->rect[1], b->rect[2], b->rect[3]);
+        else
+            continue;
+        if (d < 90 * 90 && (best < 0 || d < bd))
+            best = i, bd = d;
+    }
+    return best;
+#else
     return -1;
+#endif
 }
 
 void menu_draw_buttons(void)

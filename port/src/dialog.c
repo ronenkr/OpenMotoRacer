@@ -934,6 +934,9 @@ int dialog_key(int vk, int down)
 static int row_at(int x, int y)
 {
     int i, b[4];
+#ifdef OMR_ESP32
+    int best = -1, bd = 0, reach = g_scr_w / 7;     /* (40 of the LCD's pixels) */
+#endif
     for (i = 0; i < g_dlg->nrows; i++) {
         const Row *r = &g_dlg->row[i];
         if (r->is_static || !r->shown || !text_alive(r->shown))
@@ -941,8 +944,20 @@ static int row_at(int x, int y)
         text_now(r->shown, b);
         if (b[0] <= x && x <= b[2] && b[1] <= y && y <= b[3])
             return i;
+#ifdef OMR_ESP32
+        {   /* the board: off every row, the nearest within reach (menu.c's menu_hit) */
+            int dx = x < b[0] ? b[0] - x : x > b[2] ? x - b[2] : 0;
+            int dy = y < b[1] ? b[1] - y : y > b[3] ? y - b[3] : 0, d = dx * dx + dy * dy;
+            if (d < reach * reach && (best < 0 || d < bd))
+                best = i, bd = d;
+        }
+#endif
     }
+#ifdef OMR_ESP32
+    return best;
+#else
     return -1;
+#endif
 }
 
 /* 0x433ec0, 0x200: hovering chooses a row, and off the rows none is chosen. Not while a
