@@ -12,7 +12,12 @@
 uint16_t *g_screen;
 int g_scr_w = 640, g_scr_h = 480, g_pitch = SCREEN_MAX_W;
 
+#ifdef OMR_ESP32
+/* (on cache lines: the board's LCD DMA sends the race's picture from here as it is) */
+static uint16_t g_pixels[SCREEN_MAX_W * SCREEN_MAX_H] __attribute__((aligned(64)));
+#else
 static uint16_t g_pixels[SCREEN_MAX_W * SCREEN_MAX_H];
+#endif
 static SDL_Window *g_win;
 static SDL_Renderer *g_ren;
 static SDL_Texture *g_tex;

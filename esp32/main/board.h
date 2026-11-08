@@ -13,7 +13,8 @@
 void board_init(void);                 /* I2C, the power chip, buttons, LCD (black), touch, IMU */
 bool board_sd_mount(void);             /* the card at /sdcard */
 
-/* LCD: a rectangle of big-endian RGB565 pixels from DMA-capable memory, sent in the
+/* LCD: a rectangle of RGB565 pixels as the CPU keeps them (little-endian: the panel is set so)
+   from DMA-capable memory or 64-byte aligned PSRAM, sent in the
    background; board_lcd_wait() waits for every rectangle sent so far */
 void board_lcd_draw(int x, int y, int w, int h, const uint16_t *px);
 void board_lcd_wait(void);

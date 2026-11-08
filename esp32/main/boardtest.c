@@ -13,7 +13,7 @@
 
 static const char *TAG = "test";
 
-#define BE(c) (uint16_t)((c) << 8 | (c) >> 8)
+#define BE(c) (uint16_t)(c)                /* (the panel takes the CPU's byte order) */
 #define RGB(r, g, b) BE((uint16_t)(((r) >> 3) << 11 | ((g) >> 2) << 5 | (b) >> 3))
 
 static uint16_t *g_fb;          /* the whole screen, big-endian, internal DMA memory */

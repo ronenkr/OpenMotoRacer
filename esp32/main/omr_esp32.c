@@ -55,7 +55,7 @@ static int64_t g_send_us;               /* of it, handing the picture to the LCD
 
 static inline uint16_t swap16(uint16_t c)
 {
-    return (uint16_t)(c << 8 | c >> 8);
+    return c;                           /* (the panel takes the CPU's byte order: board.c) */
 }
 
 /* two RGB565 pixels averaged, channel by channel */
@@ -134,6 +134,7 @@ static void scale(const uint16_t *src, int w, int h, int pitch)
 
 static SemaphoreHandle_t g_scale_go, g_scale_done;
 static volatile int g_scaling;          /* a picture handed over, not yet scaled */
+static int g_direct;                    /* the race's picture being sent from the game's screen */
 static const uint16_t *g_sc_src;
 static int g_sc_w, g_sc_h, g_sc_pitch;
 
@@ -153,6 +154,12 @@ void esp32_present_wait(void)
         xSemaphoreTake(g_scale_done, portMAX_DELAY);
         g_scaling = 0;
     }
+    if (g_direct) {                     /* the screen sent: the game may draw on it again */
+        int64_t t0 = esp_timer_get_time();
+        board_lcd_wait_pending(0);
+        g_wait_us += esp_timer_get_time() - t0;
+        g_direct = 0;
+    }
 }
 
 void esp32_present(const void *pixels, int w, int h, int pitch)
@@ -164,6 +171,15 @@ void esp32_present(const void *pixels, int w, int h, int pitch)
         vTaskDelay(pdMS_TO_TICKS(20));
         shot(pixels, w, h, pitch);
         g_shot_busy = 0;
+    }
+    if (w == PIC_W && h == PIC_H && pitch == PIC_W && !((uintptr_t)pixels & 63)) {
+        /* the race at the LCD's size, its rows one after another: sent from the game's screen
+           by DMA as it is, while core 0 goes on to the next steps (no copy, no scaling) */
+        g_presents++;
+        board_lcd_wait_pending(0);
+        board_lcd_draw(0, PIC_Y, PIC_W, PIC_H, pixels);
+        g_direct = 1;
+        return;
     }
     if (!g_scale_go) {                  /* (not started yet: here) */
         scale(pixels, w, h, pitch);
@@ -535,7 +551,7 @@ void app_main(void)
     if (!board_sd_mount()) {
         static uint16_t DMA_ATTR red[LCD_W * 8];
         for (i = 0; i < LCD_W * 8; i++)
-            red[i] = 0x00f8;            /* red, big-endian */
+            red[i] = 0xf800;            /* red */
         for (i = 0; i < LCD_H; i += 8)
             board_lcd_draw(0, i, LCD_W, 8, red);
         board_lcd_wait();

@@ -137,6 +137,9 @@ static void lcd_init(void)
        in the controller's 240x320 memory */
     esp_lcd_panel_swap_xy(g_panel, true);
     esp_lcd_panel_mirror(g_panel, true, false);
+    /* RAMCTRL (0xb0): the second byte's bit 3 takes the pixels little-endian, as the CPU keeps
+       them (0xf0 is the default, MSB first): no byte swapping before a DMA */
+    esp_lcd_panel_io_tx_param(g_io, 0xb0, (uint8_t[]){ 0x00, 0xf8 }, 2);
     {   /* black, then the light on */
         static uint16_t DMA_ATTR black[LCD_W * 16];
         int y;
